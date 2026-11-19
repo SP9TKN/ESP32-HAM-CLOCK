@@ -55,8 +55,10 @@ Dane mapy © autorzy OpenStreetMap (ODbL).
 ## Panel WWW
 
 <p align="center">
-  <img src="docs/images/web-radar-settings-pl.png" width="62%" alt="Panel WWW, strona Radar: promień, linia skanowania, opisy, ikona kierunku">
-  <img src="docs/images/web-screen-order.png" width="30%" alt="Panel WWW, kolejność ekranów z APRS MAP i AIRCRAFT RADAR">
+  <img src="docs/images/web-radar-settings-pl.png" width="85%" alt="Panel WWW, strona Radar: promień, linia skanowania, opisy, ikona kierunku">
+</p>
+<p align="center">
+  <img src="docs/images/web-screen-order.png" width="38%" alt="Panel WWW, kolejność ekranów z APRS MAP i AIRCRAFT RADAR">
 </p>
 <p align="center"><sub>Strona Radar i kolejność ekranów z folderu <code>data/</code> tego forka, podane przez lokalny
 serwer testowy (ustawienia są przykładowe).</sub></p>

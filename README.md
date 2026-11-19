@@ -56,8 +56,10 @@ Map data © OpenStreetMap contributors (ODbL).
 ## Web panel
 
 <p align="center">
-  <img src="docs/images/web-radar-settings.png" width="62%" alt="Web panel, Radar page: radius, sweep line, labels, heading icon">
-  <img src="docs/images/web-screen-order.png" width="30%" alt="Web panel, TFT Screens (order) with APRS MAP and AIRCRAFT RADAR">
+  <img src="docs/images/web-radar-settings.png" width="85%" alt="Web panel, Radar page: radius, sweep line, labels, heading icon">
+</p>
+<p align="center">
+  <img src="docs/images/web-screen-order.png" width="38%" alt="Web panel, TFT Screens (order) with APRS MAP and AIRCRAFT RADAR">
 </p>
 <p align="center"><sub>The Radar page and the page order, taken from this fork's <code>data/</code> folder served by a
 local test server (the settings shown are examples).</sub></p>
