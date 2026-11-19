@@ -22,6 +22,8 @@ struct DXSpot;                // pełna definicja niżej
 struct APRSStation;           // pełna definicja niżej
 struct AprsWxDecoded;         // pełna definicja niżej
 struct PropagationData;       // pełna definicja niżej
+struct AircraftEntry;         // pełna definicja niżej
+class TFT_eSPI;
 
 // Forward declarations for UnlisHunter state used before global definitions.
 extern bool unlisRunning;
@@ -62,10 +64,12 @@ void normalizePolish(String &text) {
 #include <time.h>
 #include <ArduinoJson.h>
 #include "esp_rom_sys.h"
+#include "esp_system.h"
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 #include <FS.h>
 #include <LittleFS.h>
+#include <SD.h>
 #include <math.h>
 #include <ctype.h>
 
@@ -83,7 +87,9 @@ enum ScreenType : uint8_t {
   SCREEN_APRS_RADAR = 9,
   SCREEN_MATRIX_CLOCK = 10,
   SCREEN_UNLIS_HUNTER = 11,
-  SCREEN_WEATHER_FORECAST = 12
+  SCREEN_WEATHER_FORECAST = 12,
+  SCREEN_APRS_MAP = 13,
+  SCREEN_AIRCRAFT_RADAR = 14
 };
 
 #define LOG_VERBOSE false
@@ -171,18 +177,20 @@ bool bootSequenceActive = true;
 bool littleFsReady = false;
 
 // ========== SYSTEM MENU I NAWIGACJI ==========
-const int SCREEN_PAGE_COUNT = 11;
+const int SCREEN_PAGE_COUNT = 13;
 const ScreenType DEFAULT_SCREEN_ORDER[SCREEN_PAGE_COUNT] = {
   SCREEN_HAM_CLOCK,
   SCREEN_DX_CLUSTER,
   SCREEN_APRS_IS,
   SCREEN_APRS_RADAR,
+  SCREEN_APRS_MAP,
   SCREEN_BAND_INFO,
   SCREEN_SUN_SPOTS,
   SCREEN_WEATHER_DSP,
   SCREEN_WEATHER_FORECAST,
   SCREEN_POTA_CLUSTER,
   SCREEN_HAMALERT_CLUSTER,
+  SCREEN_AIRCRAFT_RADAR,
   SCREEN_MATRIX_CLOCK
 };
 
@@ -191,12 +199,14 @@ ScreenType screenOrder[SCREEN_PAGE_COUNT] = {
   SCREEN_DX_CLUSTER,
   SCREEN_APRS_IS,
   SCREEN_APRS_RADAR,
+  SCREEN_APRS_MAP,
   SCREEN_BAND_INFO,
   SCREEN_SUN_SPOTS,
   SCREEN_WEATHER_DSP,
   SCREEN_WEATHER_FORECAST,
   SCREEN_POTA_CLUSTER,
   SCREEN_HAMALERT_CLUSTER,
+  SCREEN_AIRCRAFT_RADAR,
   SCREEN_MATRIX_CLOCK
 };
 ScreenType currentScreen = SCREEN_OFF;  // Ustawiany po wczytaniu preferencji
@@ -276,6 +286,7 @@ static bool ensureSharedTableSprite() {
   }
   return true;
 }
+
 
 static bool isTableFooterScreen(ScreenType screenNum) {
   return (screenNum == SCREEN_DX_CLUSTER ||
@@ -551,6 +562,8 @@ bool screen6MenuBeaconingTemp = true;
 bool screen6MenuAprsAlertTemp = true;
 bool screen6MenuRangeAlertTemp = true;
 bool screen6MenuLedAlertTemp = true;
+int screen6MenuBeaconLocationTemp = -1;
+bool screen6BeaconLocationSubmenuActive = false;
 
 const int SCREEN6_VIEW_BTN_ICON_X = 294;
 const int SCREEN6_VIEW_BTN_ICON_Y = 7;
@@ -565,6 +578,34 @@ const unsigned long SCREEN6_RADAR_ZOOM_TAP_COOLDOWN_MS = 220UL;
 float screen6RadarZoom = 1.00f;
 unsigned long screen6RadarLastZoomTapMs = 0;
 const unsigned long SCREEN6_RADAR_HINT_DURATION_MS = 3000UL;
+
+// === APRS MAP (kafelki z karty SD, format raw RGB565 little-endian) ===
+// Struktura katalogów: /tiles/{zoom}/{x}/{y}.raw  (każdy plik 256*256*2 bajtów)
+// Piny SD (CYD ESP32-2432S028, VSPI): CS=5, SCK=18, MISO=19, MOSI=23
+// UWAGA: VSPI współdzielony z dotykiem — sdAcquireBus()/sdReleaseBus() zarządzają przełączaniem
+#define SD_CS_PIN 5
+#define APRS_TILE_SIZE 256
+#define APRS_MAP_ZOOM_MIN 8
+#define APRS_MAP_ZOOM_MAX 16
+#define APRS_MAP_ZOOM_STEP 1
+#define APRS_MAP_PAN_THRESHOLD 12
+int aprsMapZoom = 10;
+unsigned long aprsMapLastZoomTapMs = 0;
+bool sdCardAvailable = false;
+unsigned long aprsMapHintUntilMs = 0;
+const unsigned long APRS_MAP_HINT_DURATION_MS = 3000UL;
+float mapCenterLat = 0;
+float mapCenterLon = 0;
+static uint16_t *mapScreenBuf    = nullptr; // bufor PSRAM dla tła mapy (320*240*2 = 153600 B)
+static bool      mapBufValid     = false;   // czy bufor odpowiada bieżącemu widokowi
+static int       mapBufZoom      = -1;
+static float     mapBufCenterLat = 0.0f;
+static float     mapBufCenterLon = 0.0f;
+
+// Bufory PSRAM z grafikami symboli APRS (z karty SD /symbols/aprs_sym_N.raw)
+// [0]=primary '/', [1]=alternate '\', [2]=overlay base
+// Każdy plik: 96 symboli × 16×16 px × 2 B (LE RGB565) = 49152 B
+
 unsigned long screen6RadarHintUntilMs = 0;
 
 // Menu jasnosci (wywolywane dlugim przytrzymaniem)
@@ -651,9 +692,35 @@ struct APRSStation {
   float lon;          // Długość geograficzna
   String comment;     // Komentarz
   float freqMHz;      // Częstotliwość z komentarza (MHz)
-  float distance;     // Odległość w km (Haversine)
-  bool hasLatLon;     // Czy pozycja jest znana
+  float distance;        // Odległość w km (Haversine)
+  bool hasLatLon;        // Czy pozycja jest znana
+  unsigned long receivedAtMs = 0; // czas odbioru (millis) — do TTL na mapie
 };
+
+// Struktura dla śledzonego samolotu (OpenSky Network)
+struct AircraftEntry {
+  String icao24;
+  String callsign;
+  float lat;              // ostatnia znana szerokość (z API)
+  float lon;               // ostatnia znana długość (z API)
+  float velocity;           // m/s
+  float trueTrack;          // kurs w stopniach (0 = N)
+  float baroAltitude;        // m
+  bool onGround;
+  long timePosition;         // unix time pozycji (z API)
+  long lastContact;          // unix time ostatniego kontaktu (z API)
+  unsigned long lastSeenMs;   // millis() w momencie odebrania danych z API
+  // wygładzanie/animacja pozycji między fetchami (dead-reckoning + blend)
+  float blendFromLat;
+  float blendFromLon;
+  float blendAlpha;          // 1.0 = blend zakończony
+  unsigned long lastTickMs;
+  bool active;                // czy slot jest zajęty
+};
+
+#define MAX_AIRCRAFT 40
+AircraftEntry aircraftEntries[MAX_AIRCRAFT];
+int aircraftCount = 0;
 
 // ========== ZMIENNE GLOBALNE ==========
 WebServer* server = nullptr;
@@ -929,6 +996,17 @@ int ledAlertBlinkMs = DEFAULT_LED_ALERT_BLINK_MS;
 int aprsBeaconTxCount = 0;
 const char *APRS_POSITION_COMMENT = "https://github.com/SP3KON/ESP32-HAM-CLOCK";
 bool aprsBeaconEnabled = true;
+
+// Zaprogramowane miejsca beaconu APRS (nazwa + wspĂłĹ‚rzÄ™dne ustawiane z panelu WWW,
+// wybĂłr aktywnego miejsca odbywa siÄ™ na ekranie dotykowym w submenu Beaconing)
+#define APRS_BEACON_LOCATIONS_COUNT 6
+struct AprsBeaconLocation {
+  String name;
+  double lat;
+  double lon;
+};
+AprsBeaconLocation aprsBeaconLocations[APRS_BEACON_LOCATIONS_COUNT];
+int aprsBeaconLocationIndex = -1; // -1 = domyĹ›lna pozycja (Moja Stacja / GPS-locator)
 const unsigned long APRS_ALERT_FRAME_PULSE_MS = 500UL;
 const int APRS_ALERT_CLOSE_BTN_X = 286;
 const int APRS_ALERT_CLOSE_BTN_Y = 7;
@@ -989,6 +1067,28 @@ String qrzStatus = "QRZ: not configured";
 String weatherApiKey = "";
 String openWebRxUrl = DEFAULT_OPENWEBRX_URL;
 
+// Konfiguracja radaru samolotów (OpenSky Network)
+float aircraftRadarRadiusKm = 50.0f;
+String openSkyClientId = "";
+String openSkyClientSecret = "";
+bool aircraftShowScanline = true;
+bool aircraftShowInfoText = true;
+bool aircraftShowDirectionIcon = true;
+
+// Stan tokenu OAuth OpenSky (opcjonalny, wyższy limit zapytań)
+String openSkyBearerToken = "";
+unsigned long openSkyTokenExpiryMs = 0;
+
+// Harmonogram odpytywania OpenSky API
+unsigned long lastAircraftFetchMs = 0;
+unsigned long aircraftFetchIntervalMs = 216000UL; // przeliczane dynamicznie po pierwszym tokenie (limit 400/dobę)
+bool lastAircraftFetchOk = false;
+const unsigned long AIRCRAFT_FETCH_RETRY_MS = 60UL * 1000UL; // krótszy odstęp gdy poprzedni fetch się nie udał
+String lastAircraftFetchStatus = "brak danych"; // diagnostyka pokazywana na ekranie radaru
+double lastAircraftQueryLat = 0.0; // pozycja faktycznie uzyta w ostatnim zapytaniu do OpenSky
+double lastAircraftQueryLon = 0.0;
+unsigned long lastAircraftRadarBackgroundMs = 0;
+
 // Konfiguracja filtrĂłw CC-Cluster (dxspots.com)
 bool clusterNoAnnouncements = true;      // set/noann - wyłącz ogłoszenia
 bool clusterNoWWV = true;                // set/nowwv - wyłącz WWV
@@ -1015,6 +1115,7 @@ const uint8_t WIFI_STA_RECONNECT_ATTEMPTS = 6; // 6 * 500ms = ~3s na SSID (mniej
 const uint8_t RGB_LED_RED_PIN = 4;
 const uint8_t RGB_LED_GREEN_PIN = 16;
 const uint8_t RGB_LED_BLUE_PIN = 17;
+#define BUZZER_PIN 3  // aktywny buzzer 3.3V (miga synchronicznie z ramką alertu APRS)
 const unsigned long RGB_RED_DISCONNECTED_BLINK_MS = 1000UL;
 bool rgbLedPrevWifiConnected = false;
 unsigned long rgbRedBlinkLastToggleMs = 0;
@@ -1131,7 +1232,14 @@ void initTFT() {
   // Dla rotacji 1: szerokości 320, wysokości 240
   tft.fillScreen(TFT_WHITE);
 
-  // Inicjalizacja dotyku (XPT2046, osobny SPI)
+  // Wykryj kartę SD przez VSPI (piny standardowe CYD: SCK=18, MISO=19, MOSI=23, CS=5)
+  touchSPI.begin(18, 19, 23, SD_CS_PIN);
+  sdCardAvailable = SD.begin(SD_CS_PIN, touchSPI);
+  Serial.println(sdCardAvailable ? "SD Card OK" : "SD Card: brak lub blad");
+  SD.end();
+  touchSPI.end();
+
+  // Inicjalizacja dotyku — ten sam VSPI, inne piny
   touchSPI.begin(TOUCH_CLK, TOUCH_MISO, TOUCH_MOSI, TOUCH_CS);
   touch.begin(touchSPI);
   applyTouchRotation();
@@ -1378,6 +1486,13 @@ void drawScreen(ScreenType screenNum) {
       // On first enter to radar screen, show zoom/info hints for a short time.
       screen6RadarHintUntilMs = millis() + SCREEN6_RADAR_HINT_DURATION_MS;
     }
+    if (screenNum == SCREEN_APRS_MAP) {
+      aprsMapHintUntilMs = millis() + APRS_MAP_HINT_DURATION_MS;
+      double effLat, effLon;
+      getEffectiveAprsPosition(effLat, effLon);
+      mapCenterLat = (float)effLat;
+      mapCenterLon = (float)effLon;
+    }
     lastDrawnScreen = screenNum;
   }
 
@@ -1411,6 +1526,12 @@ void drawScreen(ScreenType screenNum) {
       break;
     case SCREEN_APRS_RADAR:
       drawAprsRadar();
+      break;
+    case SCREEN_AIRCRAFT_RADAR:
+      drawAircraftRadar();
+      break;
+    case SCREEN_APRS_MAP:
+      drawAprsMap();
       break;
     case SCREEN_POTA_CLUSTER:
       drawPotaCluster();
@@ -1664,13 +1785,13 @@ String getPolishDateStringFull() {
   }
 
   static const char* weekdaysFull[] = {
-    u8"Niedziela", u8"Poniedzia\u0142ek", u8"Wtorek",
-    u8"\u015Aroda", u8"Czwartek", u8"Pi\u0105tek", u8"Sobota"
+    "Niedziela", "Poniedzia\u0142ek", "Wtorek",
+    "\u015Aroda", "Czwartek", "Pi\u0105tek", "Sobota"
   };
   static const char* monthsFull[] = {
-    u8"stycznia", u8"lutego", u8"marca", u8"kwietnia",
-    u8"maja", u8"czerwca", u8"lipca", u8"sierpnia",
-    u8"wrze\u015Bnia", u8"pa\u017Adziernika", u8"listopada", u8"grudnia"
+    "stycznia", "lutego", "marca", "kwietnia",
+    "maja", "czerwca", "lipca", "sierpnia",
+    "wrze\u015Bnia", "pa\u017Adziernika", "listopada", "grudnia"
   };
 
   String dateBuf = String(timeinfo.tm_mday < 10 ? "0" : "") + String(timeinfo.tm_mday) +
@@ -1709,8 +1830,8 @@ String getPolishDateStringFullWithTimezone() {
   }
 
   static const char* weekdaysFull[] = {
-    u8"Niedziela", u8"Poniedzia\u0142ek", u8"Wtorek",
-    u8"\u015Aroda", u8"Czwartek", u8"Pi\u0105tek", u8"Sobota"
+    "Niedziela", "Poniedzia\u0142ek", "Wtorek",
+    "\u015Aroda", "Czwartek", "Pi\u0105tek", "Sobota"
   };
 
   String dateBuf = String(timeinfo.tm_mday < 10 ? "0" : "") + String(timeinfo.tm_mday) +
@@ -1742,6 +1863,19 @@ String getEnglishDateStringFullWithTimezone() {
   return full;
 }
 
+// TFT_eSPI::loadFont() robi kilka malloc() bez sprawdzania wyniku (biblioteka
+// zewnetrzna - nie modyfikujemy jej). Gdy stos jest pofragmentowany, malloc()
+// moze zwrocic nullptr i biblioteka i tak w niego zapisze -> crash
+// (Guru Meditation StoreProhibited, EXCVADDR 0x0), zaobserwowany po duzym
+// parsowaniu JSON (POTA) tuz przed przerysowaniem ekranu. Ten "strażnik"
+// sprawdza, czy jest wystarczajacy CIAGLY blok pamieci, zanim w ogole
+// spróbujemy zaladowac czcionke VLW; w razie braku miejsca kod juz ma
+// gotowa sciezke awaryjna (czcionka systemowa) - patrz wywolania nizej.
+static const size_t FONT_LOAD_MIN_FREE_BLOCK = 20000; // bezpieczny margines w bajtach
+static bool heapOkForFontLoad() {
+  return ESP.getMaxAllocHeap() >= FONT_LOAD_MIN_FREE_BLOCK;
+}
+
 // Rysuje linię daty/tygodnia wyśrodkowaną z użyciem polskiej czcionki VLW (jeśli dostępna)
 void drawDateLine(const String &dateText) {
   const int frameX = 10;
@@ -1754,7 +1888,7 @@ void drawDateLine(const String &dateText) {
   int textW = 0;
   int textH = 0;
 
-  if (littleFsReady && LittleFS.exists(ROBOTO_FONT20_FILE)) {
+  if (littleFsReady && LittleFS.exists(ROBOTO_FONT20_FILE) && heapOkForFontLoad()) {
     tft.loadFont(ROBOTO_FONT20_NAME, LittleFS);
     fontLoaded = true;
     textW = tft.textWidth(dateText);
@@ -3359,10 +3493,12 @@ ScreenType normalizeScreenType(uint8_t raw) {
     case SCREEN_WEATHER_FORECAST:
     case SCREEN_APRS_IS:
     case SCREEN_APRS_RADAR:
+    case SCREEN_APRS_MAP:
     case SCREEN_POTA_CLUSTER:
     case SCREEN_HAMALERT_CLUSTER:
     case SCREEN_MATRIX_CLOCK:
     case SCREEN_UNLIS_HUNTER:
+    case SCREEN_AIRCRAFT_RADAR:
       return (ScreenType)raw;
     default:
       return SCREEN_OFF;
@@ -3375,6 +3511,7 @@ const char* screenTypeToCodeStr(ScreenType t) {
     case SCREEN_DX_CLUSTER: return "dxcluster";
     case SCREEN_APRS_IS: return "aprsis";
     case SCREEN_APRS_RADAR: return "aprsradar";
+    case SCREEN_APRS_MAP: return "aprsmap";
     case SCREEN_BAND_INFO: return "bandinfo";
     case SCREEN_SUN_SPOTS: return "sunspots";
     case SCREEN_WEATHER_DSP: return "weather";
@@ -3383,6 +3520,7 @@ const char* screenTypeToCodeStr(ScreenType t) {
     case SCREEN_HAMALERT_CLUSTER: return "hamalert";
     case SCREEN_MATRIX_CLOCK: return "matrix";
     case SCREEN_UNLIS_HUNTER: return "unlishunter";
+    case SCREEN_AIRCRAFT_RADAR: return "aircraftradar";
     case SCREEN_OFF:
     default:
       return "off";
@@ -3397,6 +3535,7 @@ ScreenType screenCodeToType(const String &code) {
   if (c == "dxcluster") return SCREEN_DX_CLUSTER;
   if (c == "aprsis") return SCREEN_APRS_IS;
   if (c == "aprsradar") return SCREEN_APRS_RADAR;
+  if (c == "aprsmap") return SCREEN_APRS_MAP;
   if (c == "bandinfo") return SCREEN_BAND_INFO;
   if (c == "sunspots") return SCREEN_SUN_SPOTS;
   if (c == "weather") return SCREEN_WEATHER_DSP;
@@ -3405,6 +3544,7 @@ ScreenType screenCodeToType(const String &code) {
   if (c == "hamalert") return SCREEN_HAMALERT_CLUSTER;
   if (c == "matrix") return SCREEN_MATRIX_CLOCK;
   if (c == "unlishunter") return SCREEN_UNLIS_HUNTER;
+  if (c == "aircraftradar") return SCREEN_AIRCRAFT_RADAR;
   return SCREEN_OFF;
 }
 
@@ -3416,12 +3556,12 @@ void loadDefaultScreenOrder() {
 
 void ensureScreenOrderValid() {
   bool hasActive = false;
-  bool seen[13] = {false}; // indeksy odpowiadają ScreenType wartościom (0..12)
+  bool seen[15] = {false}; // indeksy odpowiadają ScreenType wartościom (0..14)
   for (int i = 0; i < SCREEN_ORDER_COUNT; i++) {
     screenOrder[i] = normalizeScreenType(screenOrder[i]);
     ScreenType t = screenOrder[i];
     if (t != SCREEN_OFF) {
-      if (t >= 0 && t <= SCREEN_WEATHER_FORECAST) {
+      if (t >= 0 && t <= SCREEN_AIRCRAFT_RADAR) {
         if (seen[t]) {
           // drugi raz ten sam ekran – usuń duplikat
           screenOrder[i] = SCREEN_OFF;
@@ -3509,6 +3649,9 @@ void handleTouchNavigation() {
   static unsigned long touchStartMs = 0;
   static uint16_t touchStartX = 0;
   static uint16_t touchStartY = 0;
+  static uint16_t touchCurX = 0;
+  static uint16_t touchCurY = 0;
+  static bool mapPanReady = false;
   static bool longPressHandled = false;
   static bool matrixGameHoldCandidate = false;
   unsigned long now = millis();
@@ -3578,6 +3721,15 @@ void handleTouchNavigation() {
       return;
     }
 
+    // Śledź bieżącą pozycję palca dla gestu przesuwania mapy
+    if (currentScreen == SCREEN_APRS_MAP) {
+      touchCurX = x;
+      touchCurY = y;
+      if (isNewTap) mapPanReady = true;
+    } else if (isNewTap) {
+      mapPanReady = false;
+    }
+
     if (!isNewTap) {
       return;
     }
@@ -3620,7 +3772,7 @@ void handleTouchNavigation() {
       if (currentScreen == SCREEN_HAMALERT_CLUSTER) {
         handleScreen8MenuTouch(x, y);
       }
-      if (currentScreen == SCREEN_APRS_IS || currentScreen == SCREEN_APRS_RADAR) {
+      if (currentScreen == SCREEN_APRS_IS || currentScreen == SCREEN_APRS_RADAR || currentScreen == SCREEN_APRS_MAP) {
         handleScreen6MenuTouch(x, y);
       }
       return;
@@ -3647,13 +3799,15 @@ void handleTouchNavigation() {
           return;
         }
       }
-      if (currentScreen == SCREEN_APRS_IS) {
+      if (currentScreen == SCREEN_APRS_IS || currentScreen == SCREEN_APRS_MAP) {
       if (x < menuHitW && y < menuHitH) {
         inMenu = true;
         screen6MenuBeaconingTemp = aprsBeaconEnabled;
         screen6MenuAprsAlertTemp = aprsAlertEnabled;
         screen6MenuRangeAlertTemp = aprsAlertNearbyEnabled;
         screen6MenuLedAlertTemp = enableLedAlert;
+        screen6MenuBeaconLocationTemp = aprsBeaconLocationIndex;
+        screen6BeaconLocationSubmenuActive = false;
         drawAprsSortMenu();
         return;
       }
@@ -3693,9 +3847,27 @@ void handleTouchNavigation() {
         screen6MenuAprsAlertTemp = aprsAlertEnabled;
         screen6MenuRangeAlertTemp = aprsAlertNearbyEnabled;
         screen6MenuLedAlertTemp = enableLedAlert;
+        screen6MenuBeaconLocationTemp = aprsBeaconLocationIndex;
+        screen6BeaconLocationSubmenuActive = false;
         drawAprsSortMenu();
         return;
       }
+    }
+    if (currentScreen == SCREEN_APRS_MAP) {
+      // Obsługa menu (lewy górny róg) — na tap-down
+      if (x < menuHitW && y < menuHitH) {
+        inMenu = true;
+        screen6MenuBeaconingTemp = aprsBeaconEnabled;
+        screen6MenuAprsAlertTemp = aprsAlertEnabled;
+        screen6MenuRangeAlertTemp = aprsAlertNearbyEnabled;
+        screen6MenuLedAlertTemp = enableLedAlert;
+        screen6MenuBeaconLocationTemp = aprsBeaconLocationIndex;
+        screen6BeaconLocationSubmenuActive = false;
+        drawAprsSortMenu();
+        return;
+      }
+      // Pan i zoom obsługiwane na puszczenie palca (w bloku else)
+      // Brak return — pozwól nawigacji rogami działać normalnie
     }
     if (currentScreen == SCREEN_HAM_CLOCK) {
       if (x > 285 && y < 35) {
@@ -3726,6 +3898,51 @@ void handleTouchNavigation() {
       LOGV_PRINTF("[TOUCH] Autoswitch zapauzowany na 10s (tap center)\n");
     }
   } else {
+    // Puszczenie palca — obsługa pan/zoom mapy APRS
+    if (currentScreen == SCREEN_APRS_MAP && touchActive && mapPanReady && !inMenu && !longPressHandled) {
+      int dx = (int)touchCurX - (int)touchStartX;
+      int dy = (int)touchCurY - (int)touchStartY;
+      int dist = abs(dx) + abs(dy);
+      int sw = tft.width();
+      int sh = tft.height();
+      if (dist > APRS_MAP_PAN_THRESHOLD) {
+        // Gest przesunięcia — przesuń centrum mapy
+        int32_t cPixX, cPixY;
+        latLonToAbsPixel((double)mapCenterLat, (double)mapCenterLon, aprsMapZoom, cPixX, cPixY);
+        cPixX += (int)touchCurX - sw / 2;
+        cPixY += (int)touchCurY - sh / 2;
+        double newLat, newLon;
+        absPixelToLatLon(cPixX, cPixY, aprsMapZoom, newLat, newLon);
+        mapCenterLat = (float)newLat;
+        mapCenterLon = (float)newLon;
+        drawScreen(SCREEN_APRS_MAP);
+        resetTftAutoSwitchTimer();
+      } else {
+        // Tap — zoom góra/dół (środkowy pas)
+        int xMin = sw / 4;
+        int xMax = (3 * sw) / 4;
+        bool topHalf = (touchStartX >= xMin && touchStartX <= xMax && touchStartY < (sh / 2));
+        bool botHalf = (touchStartX >= xMin && touchStartX <= xMax && touchStartY >= (sh / 2));
+        if (topHalf) {
+          int newZoom = min(APRS_MAP_ZOOM_MAX, aprsMapZoom + APRS_MAP_ZOOM_STEP);
+          if (newZoom != aprsMapZoom) {
+            aprsMapZoom = newZoom;
+            aprsMapHintUntilMs = millis() + APRS_MAP_HINT_DURATION_MS;
+            drawScreen(SCREEN_APRS_MAP);
+            resetTftAutoSwitchTimer();
+          }
+        } else if (botHalf) {
+          int newZoom = max(APRS_MAP_ZOOM_MIN, aprsMapZoom - APRS_MAP_ZOOM_STEP);
+          if (newZoom != aprsMapZoom) {
+            aprsMapZoom = newZoom;
+            aprsMapHintUntilMs = millis() + APRS_MAP_HINT_DURATION_MS;
+            drawScreen(SCREEN_APRS_MAP);
+            resetTftAutoSwitchTimer();
+          }
+        }
+      }
+    }
+
     touchActive = false;
     longPressHandled = false;
     matrixGameHoldCandidate = false;
@@ -4089,6 +4306,9 @@ static void drawAprsRadarBody() {
   buildAprsDisplayOrder(order, displayCount);
   int maxRows = min(displayCount, MAX_APRS_DISPLAY_LCD);
 
+  double radarLat, radarLon;
+  getEffectiveAprsPosition(radarLat, radarLon);
+
   for (int i = 0; i < maxRows; i++) {
     const APRSStation &station = aprsStations[order[i]];
     if (!station.hasLatLon || station.distance <= 0.0f) {
@@ -4098,7 +4318,7 @@ static void drawAprsRadarBody() {
       continue;
     }
 
-    float bearingDeg = calculateBearing(userLat, userLon, (double)station.lat, (double)station.lon);
+    float bearingDeg = calculateBearing(radarLat, radarLon, (double)station.lat, (double)station.lon);
     float angleRad = bearingDeg * (float)M_PI / 180.0f;
     float scaledRadius = (station.distance / (float)aprsFilterRadius) * outerRadius;
     if (scaledRadius > outerRadius) {
@@ -4160,6 +4380,20 @@ static void drawScreen6MenuCheckButton(int x, int y, const char *label, bool che
   tft.setTextSize(2);
   tft.setCursor(x + boxSize + 10, y + 2);
   tft.print(label);
+}
+
+static void drawBeaconLocationButton(int x, int y, int w, int h, const String &label) {
+  tft.fillRect(x, y, w, h, TFT_DARKGREY);
+  tft.drawRect(x, y, w, h, TFT_BLACK);
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_WHITE);
+  String txt = label + " >";
+  int textW = txt.length() * 6;
+  int textX = x + (w - textW) / 2;
+  if (textX < x + 2) textX = x + 2;
+  int textY = y + (h - 8) / 2;
+  tft.setCursor(textX, textY);
+  tft.print(txt);
 }
 
 void drawDxClusterFilterMenu() {
@@ -4287,6 +4521,10 @@ void drawAprsSortMenu() {
   drawScreen6MenuCheckButton(checkX, checkRowY0 + 2 * checkRowGap, "Range Alert", screen6MenuRangeAlertTemp);
   drawScreen6MenuCheckButton(checkX, checkRowY0 + 3 * checkRowGap, "LED / Buzzer", screen6MenuLedAlertTemp);
 
+  String beaconLocLabel = getBeaconLocationLabel(screen6MenuBeaconLocationTemp);
+  if (beaconLocLabel.length() > 12) beaconLocLabel = beaconLocLabel.substring(0, 12);
+  drawBeaconLocationButton(182, checkRowY0 + 0 * checkRowGap - 1, 124, 20, beaconLocLabel);
+
   const int closeW = 100;
   const int saveW = 100;
   const int closeH = 26;
@@ -4297,7 +4535,76 @@ void drawAprsSortMenu() {
   drawFilterTile(saveX, closeY, saveW, closeH, "SAVE", false);
 }
 
+void drawAprsBeaconLocationMenu() {
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextColor(TFT_WHITE);
+  tft.setTextSize(2);
+  tft.setCursor(10, 4);
+  tft.print("MIEJSCE BEACONU");
+
+  const int rowX = 10;
+  const int rowW = 300;
+  const int rowH = 20;
+  const int rowGap = 3;
+  int y = 30;
+
+  drawFilterTile(rowX, y, rowW, rowH, "Domyslne", screen6MenuBeaconLocationTemp < 0);
+  y += rowH + rowGap;
+  for (int i = 0; i < APRS_BEACON_LOCATIONS_COUNT; i++) {
+    if (aprsBeaconLocations[i].name.length() == 0) continue;
+    String label = aprsBeaconLocations[i].name;
+    if (label.length() > 20) label = label.substring(0, 20);
+    drawFilterTile(rowX, y, rowW, rowH, label.c_str(), screen6MenuBeaconLocationTemp == i);
+    y += rowH + rowGap;
+  }
+
+  const int backW = 100;
+  const int backH = 26;
+  const int backX = (320 - backW) / 2;
+  const int backY = 208;
+  drawFilterTile(backX, backY, backW, backH, "WSTECZ", false);
+}
+
+void handleAprsBeaconLocationMenuTouch(uint16_t x, uint16_t y) {
+  const int rowX = 10;
+  const int rowW = 300;
+  const int rowH = 20;
+  const int rowGap = 3;
+  int ry = 30;
+
+  if (isPointInRect(x, y, rowX, ry, rowW, rowH)) {
+    screen6MenuBeaconLocationTemp = -1;
+    drawAprsBeaconLocationMenu();
+    return;
+  }
+  ry += rowH + rowGap;
+  for (int i = 0; i < APRS_BEACON_LOCATIONS_COUNT; i++) {
+    if (aprsBeaconLocations[i].name.length() == 0) continue;
+    if (isPointInRect(x, y, rowX, ry, rowW, rowH)) {
+      screen6MenuBeaconLocationTemp = i;
+      drawAprsBeaconLocationMenu();
+      return;
+    }
+    ry += rowH + rowGap;
+  }
+
+  const int backW = 100;
+  const int backH = 26;
+  const int backX = (320 - backW) / 2;
+  const int backY = 208;
+  if (isPointInRect(x, y, backX, backY, backW, backH)) {
+    screen6BeaconLocationSubmenuActive = false;
+    drawAprsSortMenu();
+    return;
+  }
+}
+
 void handleScreen6MenuTouch(uint16_t x, uint16_t y) {
+  if (screen6BeaconLocationSubmenuActive) {
+    handleAprsBeaconLocationMenuTouch(x, y);
+    return;
+  }
+
   const int tileW = 90;
   const int tileH = 26;
   const int gap = 6;
@@ -4325,6 +4632,12 @@ void handleScreen6MenuTouch(uint16_t x, uint16_t y) {
   const int checkRowGap = 28;
   const int checkHitW = 250;
   const int checkHitH = 22;
+
+  if (isPointInRect(x, y, 182, checkRowY0 + 0 * checkRowGap - 1, 124, 20)) {
+    screen6BeaconLocationSubmenuActive = true;
+    drawAprsBeaconLocationMenu();
+    return;
+  }
 
   if (isPointInRect(x, y, checkX, checkRowY0 + 0 * checkRowGap, checkHitW, checkHitH)) {
     screen6MenuBeaconingTemp = !screen6MenuBeaconingTemp;
@@ -4364,6 +4677,7 @@ void handleScreen6MenuTouch(uint16_t x, uint16_t y) {
     aprsAlertEnabled = screen6MenuAprsAlertTemp;
     aprsAlertNearbyEnabled = screen6MenuRangeAlertTemp;
     enableLedAlert = screen6MenuLedAlertTemp;
+    aprsBeaconLocationIndex = screen6MenuBeaconLocationTemp;
     savePreferences();
     inMenu = false;
     drawScreen(currentScreen);
@@ -4625,7 +4939,7 @@ void redrawCurrentMenu() {
     drawDxClusterFilterMenu();
     return;
   }
-  if (currentScreen == SCREEN_APRS_IS || currentScreen == SCREEN_APRS_RADAR) {
+  if (currentScreen == SCREEN_APRS_IS || currentScreen == SCREEN_APRS_RADAR || currentScreen == SCREEN_APRS_MAP) {
     drawAprsSortMenu();
     return;
   }
@@ -5277,20 +5591,7 @@ void updateScreen6Data() {
         tableSprite->setCursor(50, yPos);
         tableSprite->print(station.callsign);
 
-        String symbolShort = getAPRSSymbolShort(station);
-        uint16_t symbolColor = TFT_GREEN;
-        if (symbolShort == "HUMAN") {
-          symbolColor = 0x3C1F;
-        } else if (symbolShort == "HOUSE") {
-          symbolColor = TFT_YELLOW;
-        } else if (symbolShort == "CAR") {
-          symbolColor = TFT_RED;
-        } else if (symbolShort == "HAMCLOCK") {
-          symbolColor = TFT_ORANGE;
-        }
-        tableSprite->setTextColor(symbolColor);
-        tableSprite->setCursor(125, yPos);
-        tableSprite->print(symbolShort);
+        drawAprsIsSymbolCell(tableSprite, 125, yPos, station);
 
         tableSprite->setTextColor(TFT_RADIO_ORANGE);
         tableSprite->setCursor(200, yPos);
@@ -5405,20 +5706,7 @@ void updateScreen6Data() {
       tft.setCursor(50, yPos);
       tft.print(station.callsign);
 
-      String symbolShort = getAPRSSymbolShort(station);
-      uint16_t symbolColor = TFT_GREEN;
-      if (symbolShort == "HUMAN") {
-        symbolColor = 0x3C1F;
-      } else if (symbolShort == "HOUSE") {
-        symbolColor = TFT_YELLOW;
-      } else if (symbolShort == "CAR") {
-        symbolColor = TFT_RED;
-      } else if (symbolShort == "HAMCLOCK") {
-        symbolColor = TFT_ORANGE;
-      }
-      tft.setTextColor(symbolColor);
-      tft.setCursor(125, yPos);
-      tft.print(symbolShort);
+      drawAprsIsSymbolCell(&tft, 125, yPos, station);
 
       tft.setTextColor(TFT_RADIO_ORANGE);
       tft.setCursor(200, yPos);
@@ -5447,6 +5735,104 @@ void updateScreen6Data() {
     tft.setCursor(40, 120);
     tft.print("WAITING FOR APRS...");
   }
+}
+
+// Mini ikona 10×10 px rysowana prymitywami TFT/Sprite, ix/topY = lewy górny narożnik
+static void drawAprsIsMiniIcon(TFT_eSPI *gfx, int ix, int topY, const String &icon) {
+  const int cx = ix + 5, cy = topY + 5;
+  if (icon == "IGATE") {
+    // Czarny diament z białym I
+    gfx->fillTriangle(cx, topY,    ix, cy, ix+10, cy, TFT_WHITE);
+    gfx->fillTriangle(cx, topY+10, ix, cy, ix+10, cy, TFT_WHITE);
+    gfx->fillTriangle(cx, topY+2,  ix+2, cy, ix+8, cy, TFT_BLACK);
+    gfx->fillTriangle(cx, topY+8,  ix+2, cy, ix+8, cy, TFT_BLACK);
+    // "I" jako prymityw - idealne wyśrodkowanie
+    gfx->fillRect(cx - 2, cy - 3, 5, 1, TFT_WHITE); // górny serif
+    gfx->fillRect(cx,     cy - 2, 1, 5, TFT_WHITE); // trzon
+    gfx->fillRect(cx - 2, cy + 2, 5, 1, TFT_WHITE); // dolny serif
+  } else if (icon == "LORA") {
+    const uint16_t lc = 0x0400;  // ciemniejszy zielony
+    gfx->fillTriangle(cx, topY+1, ix+1, topY+8, ix+9, topY+8, lc);
+    gfx->fillTriangle(cx, topY+9, ix+1, topY+2, ix+9, topY+2, lc);
+    // "L" jako prymityw - mieści się wewnątrz gwiazdki 10×10
+    gfx->drawFastVLine(cx - 1, cy - 2, 5, TFT_WHITE); // pionowa kreska
+    gfx->drawFastHLine(cx - 1, cy + 2, 3, TFT_WHITE); // pozioma podstawa
+  } else if (icon == "WX") {
+    gfx->fillCircle(cx, cy, 5, TFT_BLUE);
+    gfx->setTextColor(TFT_WHITE);
+    gfx->setTextSize(1);
+    gfx->setTextDatum(MC_DATUM);
+    gfx->drawString("Wx", cx, cy);
+    gfx->setTextDatum(TL_DATUM);
+  } else if (icon == "DIGI") {
+    gfx->fillTriangle(cx, topY+1, ix+1, topY+8, ix+9, topY+8, TFT_GREEN);
+    gfx->fillTriangle(cx, topY+9, ix+1, topY+2, ix+9, topY+2, TFT_GREEN);
+    gfx->fillCircle(cx, cy, 2, TFT_WHITE);
+    gfx->fillCircle(cx, cy, 1, TFT_GREEN);
+  } else if (icon == "CAR") {
+    gfx->fillRoundRect(ix, topY+3, 10, 5, 1, TFT_RED);
+    gfx->fillRect(ix+2, topY+1, 6, 3, TFT_RED);
+    gfx->fillCircle(ix+2, topY+8, 2, TFT_DARKGREY);
+    gfx->fillCircle(ix+7, topY+8, 2, TFT_DARKGREY);
+    gfx->fillCircle(ix+2, topY+8, 1, TFT_LIGHTGREY);
+    gfx->fillCircle(ix+7, topY+8, 1, TFT_LIGHTGREY);
+  } else if (icon == "HUMAN") {
+    // Niebieskia głowa + czerwone ciało (jak w APRS Alert)
+    gfx->fillCircle(cx, topY+2, 2, TFT_BLUE);
+    gfx->drawFastVLine(cx, topY+4, 4, TFT_RED);
+    gfx->drawLine(cx, topY+5, ix+2, topY+8, TFT_RED);
+    gfx->drawLine(cx, topY+5, ix+8, topY+8, TFT_RED);
+    gfx->drawLine(cx, topY+8, ix+2, topY+10, TFT_RED);
+    gfx->drawLine(cx, topY+8, ix+8, topY+10, TFT_RED);
+  } else if (icon == "HOUSE") {
+    gfx->fillRect(ix+1, topY+5, 8, 5, TFT_YELLOW);
+    gfx->fillTriangle(cx, topY, ix, topY+5, ix+10, topY+5, TFT_BLACK);
+  } else if (icon == "REPEATER") {
+    gfx->fillRect(cx-1, topY+2, 2, 8, TFT_RED);
+    gfx->drawFastHLine(ix+2, topY+3, 6, TFT_RED);
+    gfx->drawFastVLine(ix+2, topY+1, 4, TFT_RED);
+    gfx->drawFastVLine(ix+8, topY+1, 4, TFT_RED);
+    gfx->drawLine(cx, topY+5, ix+1, topY+9, TFT_RED);
+    gfx->drawLine(cx, topY+5, ix+9, topY+9, TFT_RED);
+  } else if (icon == "BIKE") {
+    // tylne koło, przednie koło
+    gfx->drawCircle(ix+2, topY+7, 3, TFT_WHITE);
+    gfx->drawCircle(ix+8, topY+7, 3, TFT_WHITE);
+    // tylny trójkąt: tylna oś→suport, tylna oś→szczyt, suport→szczyt
+    gfx->drawLine(ix+2, topY+7, ix+5, topY+7, TFT_WHITE);
+    gfx->drawLine(ix+2, topY+7, ix+3, topY+2, TFT_WHITE);
+    gfx->drawLine(ix+5, topY+7, ix+3, topY+2, TFT_WHITE);
+    // rura dolna (suport→głowica), rura górna (szczyt→głowica)
+    gfx->drawLine(ix+5, topY+7, ix+8, topY+3, TFT_WHITE);
+    gfx->drawLine(ix+3, topY+2, ix+8, topY+3, TFT_WHITE);
+    // widelec: głowica→przednia oś
+    gfx->drawLine(ix+8, topY+3, ix+8, topY+7, TFT_WHITE);
+  } else if (icon == "SHIP") {
+    gfx->fillRect(ix+1, topY+3, 8, 4, 0x024F);
+    gfx->fillTriangle(ix, topY+7, ix+10, topY+7, cx, topY+10, 0x024F);
+    gfx->fillRect(ix+3, topY+1, 5, 3, TFT_LIGHTGREY);
+  } else if (icon == "TRUCK" || icon == "VAN") {
+    gfx->fillRect(ix,   topY+2, 7, 5, TFT_WHITE);
+    gfx->fillRect(ix+7, topY+3, 3, 4, TFT_WHITE);
+    gfx->fillRect(ix+8, topY+4, 2, 2, 0x051F);
+    gfx->fillCircle(ix+2, topY+8, 2, TFT_DARKGREY);
+    gfx->fillCircle(ix+7, topY+8, 2, TFT_DARKGREY);
+    gfx->fillCircle(ix+2, topY+8, 1, TFT_LIGHTGREY);
+    gfx->fillCircle(ix+7, topY+8, 1, TFT_LIGHTGREY);
+  }
+}
+
+// Tekst nazwy symbolu + mini ikona 10×10 — wyrównane do prawej przed kolumną KM (x=200)
+static void drawAprsIsSymbolCell(TFT_eSPI *gfx, int x, int y, const APRSStation &station) {
+  String icon = getAPRSSymbolShort(station);
+  String label = icon;
+  if (label.length() > 6) label = label.substring(0, 6);
+  // tekst od lewej (x=125), ikona przy prawej krawędzi kolumny (przed KM x=200)
+  gfx->setTextColor(TFT_YELLOW);
+  gfx->setTextSize(1);
+  gfx->setCursor(x, y);
+  gfx->print(label);
+  drawAprsIsMiniIcon(gfx, 187, y - 1, icon);
 }
 
 void drawAprsIs() {
@@ -5546,20 +5932,7 @@ void drawAprsIs() {
       tft.setCursor(50, yPos);
       tft.print(station.callsign);
 
-      String symbolShort = getAPRSSymbolShort(station);
-      uint16_t symbolColor = TFT_GREEN;
-      if (symbolShort == "HUMAN") {
-        symbolColor = 0x3C1F;
-      } else if (symbolShort == "HOUSE") {
-        symbolColor = TFT_YELLOW;
-      } else if (symbolShort == "CAR") {
-        symbolColor = TFT_RED;
-      } else if (symbolShort == "HAMCLOCK") {
-        symbolColor = TFT_ORANGE;
-      }
-      tft.setTextColor(symbolColor);
-      tft.setCursor(125, yPos);
-      tft.print(symbolShort);
+      drawAprsIsSymbolCell(&tft, 125, yPos, station);
 
       tft.setTextColor(TFT_RADIO_ORANGE);
       tft.setCursor(200, yPos);
@@ -5617,6 +5990,766 @@ void drawAprsRadar() {
   }
 
   drawScreen6RadarZoomHints();
+}
+
+// Ikony samolotow (15x15, RGB565, czarny = przezroczysty) - port z oryginalnego
+// kodu radaru (PlaneIcons.h), po jednej dla kazdego z 4 kierunkow.
+constexpr int PLANE_ICON_SIZE = 15;
+constexpr uint16_t PLANE_ICON_TRANSPARENT = 0x0000;
+
+const uint16_t planeUp[] PROGMEM = {
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x07e0, 0x0000, 0x0000, 0x07e0, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000
+};
+
+const uint16_t planeRight[] PROGMEM = {
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x07e0, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x07e0, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x0000,
+  0x0000, 0x0000, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x0000,
+  0x0000, 0x07e0, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x07e0, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000
+};
+
+const uint16_t planeDown[] PROGMEM = {
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x07e0, 0x0000, 0x0000, 0x07e0, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000
+};
+
+const uint16_t planeLeft[] PROGMEM = {
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x07e0, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x07e0, 0x0000,
+  0x0000, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x0000, 0x0000,
+  0x0000, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x07e0, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x07e0, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x07e0, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x07e0, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x07e0, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x07e0, 0x07e0, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000
+};
+
+// ========== RADAR SAMOLOTÓW (OpenSky Network) - rysowanie ==========
+// UWAGA: ta plytka (CYD) NIE MA PSRAM (potwierdzone w logu: "PSRAM chip not found").
+// Kazdy sprite pelnoekranowy (320x240x16bit = 153KB) probowal wiec alokowac sie z
+// wewnetrznego heapa (~160KB wolnego przy wlaczonym WiFi/APRS/itd.) i zawsze failowal,
+// cicho wracajac do rysowania wprost na zywy TFT - stad migotanie mimo kolejnych
+// przebudow "sprite'owych". Zamiast tego: tlo rysowane rzadko wprost na TFT, a ogon
+// linii zamiatajacej dostaje wlasny, tani "tick" (wymazanie starego + narysowanie
+// nowego, tylko ok. 230px), bez zadnego dodatkowego bufora w pamieci.
+const uint16_t AIRCRAFT_RADAR_GREEN_BRIGHT = TFT_GREEN;
+const uint16_t AIRCRAFT_RADAR_GREEN_MID = 0x0500;    // rgb565(0,160,0), stała żeby nie liczyć co ramkę
+const uint16_t AIRCRAFT_RADAR_GREEN_DIM = 0x02E0;    // rgb565(0,90,0)
+
+static void computeAircraftRadarGeometry(int &centerX, int &centerY, int &outerRadius) {
+  const int screenW = tft.width();
+  const int screenH = tft.height();
+  centerX = screenW / 2;
+  centerY = screenH / 2;
+  const int pad = 6;
+  outerRadius = min(min(centerX - pad, screenW - centerX - pad),
+                     min(centerY - pad, screenH - centerY - pad));
+  if (outerRadius < 20) {
+    outerRadius = 20;
+  }
+}
+
+// Wiązka linii wachlarzowo odsuniętych prostopadle od czoła (x1,y1), z narastającą
+// jasnością - efekt "ogona" linii zamiatającej, plus jedna jasna linia główna.
+// Wszystko przycięte do maxRadius.
+static void drawAircraftScanTrail(TFT_eSPI &gfx, float x0, float y0, float x1, float y1,
+                                   int thickness, int trailBrightness, float spacing,
+                                   int lineWidth, float maxRadius) {
+  float dx = x1 - x0;
+  float dy = y1 - y0;
+  float len = sqrtf(dx * dx + dy * dy);
+  if (len < 0.0001f) return;
+  float px = -dy / len;
+  float py = dx / len;
+
+  auto clampPoint = [&](float ex, float ey, float &ox, float &oy) {
+    if (maxRadius < 0) { ox = ex; oy = ey; return; }
+    float vx = ex - x0;
+    float vy = ey - y0;
+    float dist = sqrtf(vx * vx + vy * vy);
+    if (dist <= maxRadius || dist == 0) { ox = ex; oy = ey; return; }
+    float scale = maxRadius / dist;
+    ox = x0 + vx * scale;
+    oy = y0 + vy * scale;
+  };
+
+  for (int i = 1; i <= thickness; i++) {
+    float t = (float)i / (float)thickness;
+    uint8_t brightness = (uint8_t)(t * trailBrightness);
+    float ex, ey;
+    clampPoint(x1 + (px * (i * spacing)), y1 + (py * (i * spacing)), ex, ey);
+    gfx.drawLine((int)x0, (int)y0, (int)ex, (int)ey, rgb565(0, brightness, 0));
+  }
+
+  for (int w = 0; w < lineWidth; w++) {
+    float offset = w - (lineWidth - 1) / 2.0f;
+    float ox = px * offset;
+    float oy = py * offset;
+    float ex, ey;
+    clampPoint(x1 + (px * (thickness * spacing)) + ox, y1 + (py * (thickness * spacing)) + oy, ex, ey);
+    gfx.drawLine((int)(x0 + ox), (int)(y0 + oy), (int)ex, (int)ey, rgb565(0, 200, 0));
+  }
+}
+
+// Statyczne tło: pierścienie, krzyż, opisy zasięgu, status ostatniego pobrania, tytuł.
+// Rysowane RZADKO (nie co klatkę) do przekazanego celu (sprite tła albo, w trybie
+// awaryjnym bez sprite'ów, wprost na tft).
+static void paintAircraftRadarBackground(TFT_eSPI &gfx) {
+  gfx.fillScreen(TFT_BLACK);
+  int centerX, centerY, outerRadius;
+  computeAircraftRadarGeometry(centerX, centerY, outerRadius);
+  const int screenW = tft.width();
+  const int screenH = tft.height();
+  const int halfRadius = max(1, outerRadius / 2);
+
+  gfx.drawCircle(centerX, centerY, outerRadius, AIRCRAFT_RADAR_GREEN_BRIGHT);
+  gfx.drawCircle(centerX, centerY, halfRadius, AIRCRAFT_RADAR_GREEN_DIM);
+  gfx.drawFastVLine(centerX, centerY - outerRadius, outerRadius * 2, AIRCRAFT_RADAR_GREEN_DIM);
+  gfx.drawFastHLine(centerX - outerRadius, centerY, outerRadius * 2, AIRCRAFT_RADAR_GREEN_DIM);
+
+  auto kmLabel = [](float km) -> String {
+    if (km >= 100.0f) return String((int)(km + 0.5f)) + "km";
+    if (km >= 10.0f) return String(km, 1) + "km";
+    return String(km, 2) + "km";
+  };
+  gfx.setTextSize(1);
+  gfx.setTextColor(AIRCRAFT_RADAR_GREEN_MID);
+  gfx.setCursor(centerX + 4, max(0, centerY - outerRadius + 2));
+  gfx.print(kmLabel(aircraftRadarRadiusKm));
+  gfx.setCursor(centerX + 4, max(0, centerY - halfRadius + 2));
+  gfx.print(kmLabel(aircraftRadarRadiusKm * 0.5f));
+
+  gfx.setTextColor(AIRCRAFT_RADAR_GREEN_MID);
+  gfx.setCursor(4, screenH - 9);
+  gfx.print(lastAircraftFetchStatus);
+
+  gfx.setTextColor(AIRCRAFT_RADAR_GREEN_BRIGHT);
+  gfx.setTextSize(2);
+  const char *radarTitleTop = "RADAR";
+  const char *radarTitleBottom = "LOTOW";
+  int topWidth = strlen(radarTitleTop) * 12;
+  int bottomWidth = strlen(radarTitleBottom) * 12;
+  gfx.setCursor(screenW - topWidth - 4, screenH - 36);
+  gfx.print(radarTitleTop);
+  gfx.setCursor(screenW - bottomWidth - 4, screenH - 20);
+  gfx.print(radarTitleBottom);
+}
+
+// Samoloty (ikony/kropki + opcjonalny opis) - rysowane bezpośrednio na tft.
+// Odświeżane razem z tłem (rzadko), NIE co szybki tick liniowy.
+static void paintAircraftRadarAircraft() {
+  int centerX, centerY, outerRadius;
+  computeAircraftRadarGeometry(centerX, centerY, outerRadius);
+  TFT_eSPI &gfx = tft;
+
+  double homeLat, homeLon;
+  getEffectiveAprsPosition(homeLat, homeLon);
+
+  unsigned long now = millis();
+  for (int i = 0; i < MAX_AIRCRAFT; i++) {
+    AircraftEntry &ac = aircraftEntries[i];
+    if (!ac.active || ac.onGround) {
+      continue;
+    }
+
+    aircraftTick(ac, now);
+    float predLat, predLon;
+    aircraftGetDisplayPosition(ac, predLat, predLon);
+
+    float distanceKm = calculateDistance(homeLat, homeLon, (double)predLat, (double)predLon);
+    if (distanceKm > aircraftRadarRadiusKm) {
+      continue;
+    }
+
+    float bearingDeg = calculateBearing(homeLat, homeLon, (double)predLat, (double)predLon);
+    float angleRad = bearingDeg * (float)M_PI / 180.0f;
+    float scaledRadius = (distanceKm / aircraftRadarRadiusKm) * outerRadius;
+    int px = centerX + (int)(sin(angleRad) * scaledRadius);
+    int py = centerY - (int)(cos(angleRad) * scaledRadius);
+
+    uint16_t color = TFT_GREEN;
+
+    if (aircraftShowDirectionIcon) {
+      float heading = fmodf(ac.trueTrack, 360.0f);
+      if (heading < 0) heading += 360.0f;
+      // Bitmapowa ikona samolotu (port z oryginalnego kodu radaru) - 4 kierunki.
+      const uint16_t *icon;
+      if (heading >= 315.0f || heading < 45.0f) {           // N
+        icon = planeUp;
+      } else if (heading < 135.0f) {                        // E
+        icon = planeRight;
+      } else if (heading < 225.0f) {                         // S
+        icon = planeDown;
+      } else {                                                // W
+        icon = planeLeft;
+      }
+      // Rysujemy piksel po pikselu przez drawPixel() (jest virtual) zamiast pushImage()
+      // (nie jest virtual w TFT_eSPI) - pushImage() wywolane przez referencje TFT_eSPI&
+      // trafiloby w metode bazowej klasy i pisalo bezposrednio po SPI z pominieciem
+      // bufora, gdy gfx wskazuje na sprite.
+      const int half = PLANE_ICON_SIZE / 2;
+      for (int iy = 0; iy < PLANE_ICON_SIZE; iy++) {
+        for (int ix = 0; ix < PLANE_ICON_SIZE; ix++) {
+          uint16_t iconColor = icon[iy * PLANE_ICON_SIZE + ix];
+          if (iconColor != PLANE_ICON_TRANSPARENT) {
+            gfx.drawPixel(px - half + ix, py - half + iy, iconColor);
+          }
+        }
+      }
+    } else {
+      gfx.fillCircle(px, py, 3, color);
+    }
+
+    if (aircraftShowInfoText) {
+      String call = ac.callsign;
+      call.trim();
+      if (call.length() == 0) call = ac.icao24;
+      int ty = py - 16;
+      if (ty < 2) ty = py + 8;
+      gfx.setTextSize(1);
+      gfx.setTextColor(color);
+      gfx.setCursor(px + 5, ty);
+      gfx.print(call);
+      gfx.setCursor(px + 5, ty + 9);
+      gfx.print(String((int)(ac.velocity * 3.6f)) + "km/h");
+      gfx.setCursor(px + 5, ty + 18);
+      gfx.print(String((int)ac.baroAltitude) + "m");
+    }
+
+    if ((i & 0x03) == 0) {
+      yield();
+    }
+  }
+}
+
+// Pełne przerysowanie: tło + linia zamiatająca + samoloty, wprost na tft. Jedyna operacja
+// rysująca dla tego ekranu - wywoływana rzadko (co 2s), bez żadnej animacji/ticków
+// pomiędzy, żeby wykluczyć jakiekolwiek ryzyko migania czy artefaktów.
+void drawAircraftRadar() {
+  paintAircraftRadarBackground(tft);
+
+  int centerX, centerY, outerRadius;
+  computeAircraftRadarGeometry(centerX, centerY, outerRadius);
+  if (aircraftShowScanline) {
+    float sweepAngle = fmodf(millis() / 3000.0f, 1.0f) * 2.0f * (float)M_PI;
+    float sx = centerX + sin(sweepAngle) * outerRadius;
+    float sy = centerY - cos(sweepAngle) * outerRadius;
+    drawAircraftScanTrail(tft, (float)centerX, (float)centerY, sx, sy, 20, 128, 5.0f, 1, (float)outerRadius);
+  }
+  tft.fillCircle(centerX, centerY, 4, AIRCRAFT_RADAR_GREEN_BRIGHT);
+
+  paintAircraftRadarAircraft();
+}
+
+// ========== APRS MAP (kafelki z karty SD) ==========
+
+// Przełącz VSPI na piny SD (SCK=18,MISO=19,MOSI=23,CS=5) przed dostępem do pliku
+static void sdAcquireBus() {
+  // Deassertuj CS dotyku przed przełączeniem magistrali
+  digitalWrite(TOUCH_CS, HIGH);
+  touchSPI.end();
+  touchSPI.begin(18, 19, 23, SD_CS_PIN);
+  // Retry 3x z krótką przerwą — karta SD może potrzebować chwili po przejściowym błędzie
+  for (int attempt = 0; attempt < 3; attempt++) {
+    if (SD.begin(SD_CS_PIN, touchSPI)) {
+      sdCardAvailable = true;  // odtwórz jeśli poprzednio był błąd
+      return;
+    }
+    SD.end();
+    delay(15);
+  }
+  Serial.println("[SD] begin failed po 3 probach");
+  sdCardAvailable = false;
+}
+
+// Przywróć VSPI dla dotyku po dostępie do SD
+static void sdReleaseBus() {
+  SD.end();
+  touchSPI.end();
+  // Trzymaj CS karty SD na HIGH żeby nie dostawała śmieci podczas pracy dotyku
+  pinMode(SD_CS_PIN, OUTPUT);
+  digitalWrite(SD_CS_PIN, HIGH);
+  touchSPI.begin(TOUCH_CLK, TOUCH_MISO, TOUCH_MOSI, TOUCH_CS);
+  touch.begin(touchSPI);
+}
+
+// Konwertuj lat/lon na piksel absolutny w układzie Web Mercator dla danego poziomu zoomu
+static void latLonToAbsPixel(double lat, double lon, int zoom,
+                              int32_t &pixX, int32_t &pixY) {
+  double latRad = lat * M_PI / 180.0;
+  double n = (double)(1L << zoom) * APRS_TILE_SIZE;
+  pixX = (int32_t)((lon + 180.0) / 360.0 * n);
+  pixY = (int32_t)((1.0 - log(tan(latRad) + 1.0 / cos(latRad)) / M_PI) / 2.0 * n);
+}
+
+// Odwrotna projekcja: piksel absolutny → lat/lon
+static void absPixelToLatLon(int32_t pixX, int32_t pixY, int zoom,
+                              double &lat, double &lon) {
+  double n = (double)(1L << zoom) * APRS_TILE_SIZE;
+  lon = (double)pixX / n * 360.0 - 180.0;
+  double yNorm = 1.0 - 2.0 * (double)pixY / n;
+  lat = atan(sinh(yNorm * M_PI)) * 180.0 / M_PI;
+}
+
+// Rysuj fragment kafelka raw-RGB565 (little-endian, 256x256px) na ekranie TFT.
+// Plik: /tiles/{zoom}/{tileX}/{tileY}.raw — 256*256*2 bajtów, top-down, left-right, LE uint16
+// Parametry: srcX/srcY — przesunięcie w kafelku; dstX/dstY — cel na ekranie; w,h — rozmiar
+static bool drawTileRaw565(int tileX, int tileY, int zoom,
+                            int srcX, int srcY, int dstX, int dstY, int w, int h) {
+  char path[56];
+  snprintf(path, sizeof(path), "/tiles/%d/%d/%d.raw", zoom, tileX, tileY);
+  File f = SD.open(path, FILE_READ);
+  if (!f) return false;
+
+  // Bufor na 8 wierszy naraz — mniej operacji seek/read = szybsze ładowanie
+  static uint16_t tileBuf[APRS_TILE_SIZE * 8];
+  tft.startWrite();
+  tft.setAddrWindow(dstX, dstY, w, h);
+  if (srcX == 0 && w == APRS_TILE_SIZE) {
+    // Kafelek pełnej szerokości — czytaj partiami po 8 wierszy
+    f.seek((uint32_t)srcY * APRS_TILE_SIZE * 2);
+    int rowsLeft = h;
+    while (rowsLeft > 0) {
+      int batch = min(rowsLeft, 8);
+      if (f.read((uint8_t*)tileBuf, batch * APRS_TILE_SIZE * 2) <= 0) break;
+      tft.pushColors(tileBuf, batch * APRS_TILE_SIZE, true);
+      rowsLeft -= batch;
+    }
+  } else {
+    // Kafelek częściowy (brzeg ekranu) — wiersz po wierszu
+    for (int row = 0; row < h; row++) {
+      uint32_t offset = ((uint32_t)(srcY + row) * APRS_TILE_SIZE + srcX) * 2;
+      if (!f.seek(offset)) break;
+      if (f.read((uint8_t*)tileBuf, w * 2) != w * 2) break;
+      tft.pushColors(tileBuf, w, true);
+    }
+  }
+  tft.endWrite();
+  f.close();
+  return true;
+}
+
+// Zapisz fragment kafelka raw-RGB565 do bufora PSRAM zamiast na TFT.
+// Interfejs identyczny jak drawTileRaw565 — różni się tylko celem zapisu.
+static bool writeTileToBuffer(int tileX, int tileY, int zoom,
+                               int srcX, int srcY, int dstX, int dstY, int w, int h,
+                               int bufW) {
+  char path[56];
+  snprintf(path, sizeof(path), "/tiles/%d/%d/%d.raw", zoom, tileX, tileY);
+  File f = SD.open(path, FILE_READ);
+  if (!f) return false;
+  static uint16_t rowBuf[APRS_TILE_SIZE * 8];
+  if (srcX == 0 && w == APRS_TILE_SIZE) {
+    f.seek((uint32_t)srcY * APRS_TILE_SIZE * 2);
+    int rowsLeft = h, row = 0;
+    while (rowsLeft > 0) {
+      int batch = min(rowsLeft, 8);
+      if (f.read((uint8_t*)rowBuf, (size_t)batch * APRS_TILE_SIZE * 2) <= 0) break;
+      for (int br = 0; br < batch; br++)
+        memcpy(&mapScreenBuf[(dstY + row + br) * bufW + dstX],
+               &rowBuf[br * APRS_TILE_SIZE], (size_t)APRS_TILE_SIZE * 2);
+      row += batch;
+      rowsLeft -= batch;
+    }
+  } else {
+    for (int row = 0; row < h; row++) {
+      uint32_t off = ((uint32_t)(srcY + row) * APRS_TILE_SIZE + srcX) * 2;
+      if (!f.seek(off)) break;
+      if (f.read((uint8_t*)&mapScreenBuf[(dstY + row) * bufW + dstX],
+                 (size_t)w * 2) != (int)w * 2) break;
+    }
+  }
+  f.close();
+  return true;
+}
+
+void drawAprsMap() {
+  const int screenW = tft.width();
+  const int screenH = tft.height();
+
+  // Alokuj bufor PSRAM przy pierwszym wywołaniu
+  if (mapScreenBuf == nullptr)
+    mapScreenBuf = (uint16_t*)heap_caps_malloc((size_t)screenW * screenH * 2, MALLOC_CAP_SPIRAM);
+
+  // Środek mapy = mapCenter (może być przesunięty przez pana)
+  if (mapCenterLat == 0 && mapCenterLon == 0) {
+    double effLat, effLon;
+    getEffectiveAprsPosition(effLat, effLon);
+    mapCenterLat = (float)effLat;
+    mapCenterLon = (float)effLon;
+  }
+  int32_t centerPixX, centerPixY;
+  latLonToAbsPixel((double)mapCenterLat, (double)mapCenterLon, aprsMapZoom, centerPixX, centerPixY);
+  int32_t tlPixX = centerPixX - screenW / 2;
+  int32_t tlPixY = centerPixY - screenH / 2;
+
+  // Unieważnij bufor gdy zmienił się widok (zoom lub centrum)
+  if (mapBufZoom != aprsMapZoom ||
+      fabsf(mapBufCenterLat - mapCenterLat) > 1e-5f ||
+      fabsf(mapBufCenterLon - mapCenterLon) > 1e-5f)
+    mapBufValid = false;
+
+  if (!sdCardAvailable) {
+    // Próba odtworzenia połączenia z kartą SD po przejściowym błędzie
+    sdAcquireBus();
+    sdReleaseBus();
+  }
+  if (!sdCardAvailable) {
+    tft.fillScreen(TFT_NAVY);
+    tft.setTextColor(TFT_WHITE);
+    tft.setTextSize(2);
+    int msgW = 14 * 12;
+    tft.setCursor((screenW - msgW) / 2, screenH / 2 - 16);
+    tft.print("BRAK KARTY SD");
+    tft.setTextSize(1);
+    tft.setTextColor(TFT_LIGHTGREY);
+    tft.setCursor((screenW - 18 * 6) / 2, screenH / 2 + 4);
+    tft.print("/tiles/zoom/x/y.raw");
+  } else if (mapScreenBuf == nullptr) {
+    // Alokacja PSRAM nie powiodła się — rysuj bezpośrednio z SD (fallback)
+    tft.fillScreen(TFT_NAVY);
+    int startTX = (int)(tlPixX / APRS_TILE_SIZE);
+    int startTY = (int)(tlPixY / APRS_TILE_SIZE);
+    if (tlPixX < 0) startTX--;
+    if (tlPixY < 0) startTY--;
+    int endTX = (int)((tlPixX + screenW - 1) / APRS_TILE_SIZE);
+    int endTY = (int)((tlPixY + screenH - 1) / APRS_TILE_SIZE);
+    bool anyDrawn = false;
+    sdAcquireBus();
+    for (int ty = startTY; ty <= endTY; ty++) {
+      for (int tx = startTX; tx <= endTX; tx++) {
+        int32_t tilePxL = (int32_t)tx * APRS_TILE_SIZE;
+        int32_t tilePxT = (int32_t)ty * APRS_TILE_SIZE;
+        int srcX = (int)max((int32_t)0, tlPixX - tilePxL);
+        int srcY = (int)max((int32_t)0, tlPixY - tilePxT);
+        int srcR = (int)min((int32_t)APRS_TILE_SIZE, tlPixX + screenW - tilePxL);
+        int srcB = (int)min((int32_t)APRS_TILE_SIZE, tlPixY + screenH - tilePxT);
+        int w = srcR - srcX, h = srcB - srcY;
+        if (w <= 0 || h <= 0) continue;
+        int dstX = (int)(tilePxL + srcX - tlPixX);
+        int dstY = (int)(tilePxT + srcY - tlPixY);
+        if (drawTileRaw565(tx, ty, aprsMapZoom, srcX, srcY, dstX, dstY, w, h)) anyDrawn = true;
+        yield();
+      }
+    }
+    sdReleaseBus();
+    if (!anyDrawn) {
+      tft.setTextColor(TFT_YELLOW); tft.setTextSize(2);
+      tft.setCursor((screenW - 13*12)/2, screenH/2 - 16); tft.print("BRAK KAFELKOW");
+      char hint[32]; snprintf(hint, sizeof(hint), "/tiles/%d/X/Y.raw", aprsMapZoom);
+      tft.setTextSize(1); tft.setTextColor(TFT_LIGHTGREY);
+      tft.setCursor((screenW - (int)strlen(hint)*6)/2, screenH/2 + 4); tft.print(hint);
+    }
+  } else if (!mapBufValid) {
+    // Załaduj kafelki z SD do bufora PSRAM
+    memset(mapScreenBuf, 0, (size_t)screenW * screenH * 2);
+
+    int startTX = (int)(tlPixX / APRS_TILE_SIZE);
+    int startTY = (int)(tlPixY / APRS_TILE_SIZE);
+    if (tlPixX < 0) startTX--;
+    if (tlPixY < 0) startTY--;
+    int endTX = (int)((tlPixX + screenW - 1) / APRS_TILE_SIZE);
+    int endTY = (int)((tlPixY + screenH - 1) / APRS_TILE_SIZE);
+
+    bool anyDrawn = false;
+    sdAcquireBus();
+    for (int ty = startTY; ty <= endTY; ty++) {
+      for (int tx = startTX; tx <= endTX; tx++) {
+        int32_t tilePxL = (int32_t)tx * APRS_TILE_SIZE;
+        int32_t tilePxT = (int32_t)ty * APRS_TILE_SIZE;
+        int srcX = (int)max((int32_t)0, tlPixX - tilePxL);
+        int srcY = (int)max((int32_t)0, tlPixY - tilePxT);
+        int srcR = (int)min((int32_t)APRS_TILE_SIZE, tlPixX + screenW - tilePxL);
+        int srcB = (int)min((int32_t)APRS_TILE_SIZE, tlPixY + screenH - tilePxT);
+        int w = srcR - srcX, h = srcB - srcY;
+        if (w <= 0 || h <= 0) continue;
+        int dstX = (int)(tilePxL + srcX - tlPixX);
+        int dstY = (int)(tilePxT + srcY - tlPixY);
+        if (writeTileToBuffer(tx, ty, aprsMapZoom, srcX, srcY, dstX, dstY, w, h, screenW))
+          anyDrawn = true;
+        yield();
+      }
+    }
+    sdReleaseBus();
+
+    mapBufZoom      = aprsMapZoom;
+    mapBufCenterLat = mapCenterLat;
+    mapBufCenterLon = mapCenterLon;
+    mapBufValid     = true;
+
+    // Blit załadowanego bufora na TFT
+    tft.startWrite();
+    tft.setAddrWindow(0, 0, screenW, screenH);
+    tft.pushColors(mapScreenBuf, screenW * screenH, true);
+    tft.endWrite();
+
+    if (!anyDrawn) {
+      tft.setTextColor(TFT_YELLOW); tft.setTextSize(2);
+      tft.setCursor((screenW - 13*12)/2, screenH/2 - 16); tft.print("BRAK KAFELKOW");
+      char hint[32]; snprintf(hint, sizeof(hint), "/tiles/%d/X/Y.raw", aprsMapZoom);
+      tft.setTextSize(1); tft.setTextColor(TFT_LIGHTGREY);
+      tft.setCursor((screenW - (int)strlen(hint)*6)/2, screenH/2 + 4); tft.print(hint);
+    }
+  } else {
+    // Bufor aktualny — stream render: odczyt PSRAM rząd po rzędzie + kółka stacji wbudowane
+    // Jeden SPI transfer → zero migania między tłem a znacznikami
+
+    // Pre-oblicz pozycje widocznych stacji
+    struct AprsMapMarker { int16_t sx, sy; uint16_t color; };
+    AprsMapMarker markers[MAX_APRS_STATIONS];
+    int mCnt = 0;
+    const unsigned long mapNowMs = millis();
+    for (int i = 0; i < aprsStationCount && mCnt < MAX_APRS_STATIONS; i++) {
+      const APRSStation &s = aprsStations[i];
+      if (!s.hasLatLon) continue;
+      if (s.receivedAtMs > 0 && mapNowMs - s.receivedAtMs > 3600000UL) continue;
+      int32_t px, py;
+      latLonToAbsPixel((double)s.lat, (double)s.lon, aprsMapZoom, px, py);
+      int sx = (int)(px - tlPixX), sy = (int)(py - tlPixY);
+      if (sx < 4 || sx >= screenW - 4 || sy < 4 || sy >= screenH - 4) continue;
+      markers[mCnt++] = { (int16_t)sx, (int16_t)sy, getAprsRadarColorForStation(s) };
+    }
+
+    int myX = (int)(centerPixX - tlPixX);
+    int myY = (int)(centerPixY - tlPixY);
+    const uint16_t orangeColor = TFT_RADIO_ORANGE;
+
+    const int R = 4, R2 = R * R, Rout2 = (R - 1) * (R - 1);
+    const int dotR = 3, dotR2 = dotR * dotR, crossR = 8;
+
+    uint16_t rowBuf[320];
+    tft.startWrite();
+    tft.setAddrWindow(0, 0, screenW, screenH);
+    for (int y = 0; y < screenH; y++) {
+      memcpy(rowBuf, &mapScreenBuf[(uint32_t)y * screenW], (size_t)screenW * 2);
+
+      // Kółka stacji APRS
+      for (int m = 0; m < mCnt; m++) {
+        int dy = y - markers[m].sy;
+        if (dy < -R || dy > R) continue;
+        int dy2 = dy * dy;
+        for (int dx = -R; dx <= R; dx++) {
+          int x = markers[m].sx + dx;
+          if ((unsigned)x >= (unsigned)screenW) continue;
+          int d2 = dx * dx + dy2;
+          if (d2 <= R2) rowBuf[x] = (d2 >= Rout2) ? TFT_BLACK : markers[m].color;
+        }
+      }
+
+      // Krzyżyk + kropka własnej pozycji
+      if ((unsigned)myX < (unsigned)screenW) {
+        int ady = y - myY;
+        if (ady >= -crossR && ady <= crossR) {
+          if (ady == 0) {
+            int x0 = max(0, myX - crossR), x1 = min(screenW - 1, myX + crossR);
+            for (int x = x0; x <= x1; x++) rowBuf[x] = orangeColor;
+          }
+          rowBuf[myX] = orangeColor;
+        }
+        if (ady >= -dotR && ady <= dotR) {
+          int ady2 = ady * ady;
+          for (int dx = -dotR; dx <= dotR; dx++) {
+            int x = myX + dx;
+            if ((unsigned)x < (unsigned)screenW && dx * dx + ady2 <= dotR2)
+              rowBuf[x] = orangeColor;
+          }
+        }
+      }
+
+      tft.pushColors(rowBuf, screenW, true);
+    }
+    tft.endWrite();
+
+    // Callsign labels (tekst — po blit, szybkie operacje TFT)
+    for (int i = 0; i < aprsStationCount; i++) {
+      const APRSStation &s = aprsStations[i];
+      if (!s.hasLatLon) continue;
+      if (s.receivedAtMs > 0 && millis() - s.receivedAtMs > 3600000UL) continue;
+      int32_t px, py;
+      latLonToAbsPixel((double)s.lat, (double)s.lon, aprsMapZoom, px, py);
+      int sx = (int)(px - tlPixX), sy = (int)(py - tlPixY);
+      if (sx < 4 || sx >= screenW - 4 || sy < 4 || sy >= screenH - 4) continue;
+      String call = s.callsign;
+      if (call.length() > 8) call = call.substring(0, 8);
+      int tx_ = sx - (int)(call.length() * 3);
+      int ty_ = sy - 13;
+      if (tx_ < 1) tx_ = 1;
+      if (tx_ > screenW - (int)(call.length() * 6) - 1) tx_ = screenW - (int)(call.length() * 6) - 1;
+      if (ty_ < 2) ty_ = sy + 7;
+      if (ty_ > screenH - 9) ty_ = screenH - 9;
+      tft.setTextColor(TFT_BLACK);
+      tft.setTextSize(1);
+      tft.setCursor(tx_, ty_);
+      tft.print(call);
+      if ((i & 3) == 0) yield();
+    }
+
+    // Nakładki tekstowe
+    tft.setTextSize(2);
+    tft.setTextColor(TFT_BLACK);
+    char zInfo[8];
+    snprintf(zInfo, sizeof(zInfo), "Z:%d", aprsMapZoom);
+    tft.setCursor(4, 4);
+    tft.print(zInfo);
+
+    struct tm timeinfo;
+    if (getTimeWithTimezone(&timeinfo)) {
+      char timeBuffer[6];
+      strftime(timeBuffer, 6, "%H:%M", &timeinfo);
+      int timeWidth = strlen(timeBuffer) * 12;
+      tft.setTextSize(2);
+      tft.setTextColor(TFT_BLACK);
+      tft.setCursor(screenW - timeWidth - 4, 5);
+      tft.print(timeBuffer);
+    }
+
+    tft.setTextSize(2);
+    tft.setTextColor(TFT_BLACK);
+    tft.setCursor(screenW - 4 * 12 - 4, screenH - 36);
+    tft.print("APRS");
+    tft.setCursor(screenW - 3 * 12 - 4, screenH - 20);
+    tft.print("MAP");
+
+    if (millis() < aprsMapHintUntilMs) {
+      const char *topHint = "ZOOM +";
+      const char *botHint = "ZOOM -";
+      int topW = strlen(topHint) * 12;
+      int botW = strlen(botHint) * 12;
+      tft.setTextSize(2);
+      tft.setTextColor(TFT_YELLOW);
+      tft.setCursor((screenW - topW) / 2, 6);
+      tft.print(topHint);
+      tft.setCursor((screenW - botW) / 2, screenH - 20);
+      tft.print(botHint);
+    }
+    return;
+  }
+
+  // Poniżej: przypadki bez bufora PSRAM lub pierwszego ładowania kafelków
+  // (mapScreenBuf==nullptr lub !mapBufValid) — bezpośrednie TFT calls
+
+  // Narysuj stacje APRS na wierzchu mapy (wszystkie w oknie 1 godziny)
+  const unsigned long mapNowMs = millis();
+  for (int i = 0; i < aprsStationCount; i++) {
+    const APRSStation &station = aprsStations[i];
+    if (!station.hasLatLon) continue;
+    if (station.receivedAtMs > 0 && mapNowMs - station.receivedAtMs > 60UL * 60UL * 1000UL) continue;
+    int32_t staPxX, staPxY;
+    latLonToAbsPixel((double)station.lat, (double)station.lon, aprsMapZoom, staPxX, staPxY);
+    int sx = (int)(staPxX - tlPixX);
+    int sy = (int)(staPxY - tlPixY);
+    if (sx < 4 || sx >= screenW - 4 || sy < 4 || sy >= screenH - 4) continue;
+    uint16_t color = getAprsRadarColorForStation(station);
+    tft.fillCircle(sx, sy, 4, color);
+    tft.drawCircle(sx, sy, 4, TFT_BLACK);
+    String call = station.callsign;
+    if (call.length() > 8) call = call.substring(0, 8);
+    int tx_ = sx - (int)(call.length() * 3);
+    int ty_ = sy - 13;
+    if (tx_ < 1) tx_ = 1;
+    if (tx_ > screenW - (int)(call.length() * 6) - 1) tx_ = screenW - (int)(call.length() * 6) - 1;
+    if (ty_ < 2) ty_ = sy + 7;
+    if (ty_ > screenH - 9) ty_ = screenH - 9;
+    tft.setTextColor(TFT_BLACK);
+    tft.setTextSize(1);
+    tft.setCursor(tx_, ty_);
+    tft.print(call);
+    if ((i & 0x03) == 0) yield();
+  }
+
+  // Znacznik własnej pozycji (krzyżyk)
+  int myX = (int)(centerPixX - tlPixX);
+  int myY = (int)(centerPixY - tlPixY);
+  tft.drawFastHLine(myX - 8, myY, 17, TFT_RADIO_ORANGE);
+  tft.drawFastVLine(myX, myY - 8, 17, TFT_RADIO_ORANGE);
+  tft.fillCircle(myX, myY, 3, TFT_RADIO_ORANGE);
+
+  // Lewy górny róg — poziom zoomu (zawsze widoczny)
+  tft.setTextSize(2);
+  tft.setTextColor(TFT_BLACK);
+  char zInfo[8];
+  snprintf(zInfo, sizeof(zInfo), "Z:%d", aprsMapZoom);
+  tft.setCursor(4, 4);
+  tft.print(zInfo);
+
+  // Prawy górny róg — zegar UTC
+  struct tm timeinfo;
+  if (getTimeWithTimezone(&timeinfo)) {
+    char timeBuffer[6];
+    strftime(timeBuffer, 6, "%H:%M", &timeinfo);
+    int timeWidth = strlen(timeBuffer) * 12;
+    tft.setTextSize(2);
+    tft.setTextColor(TFT_BLACK);
+    tft.setCursor(screenW - timeWidth - 4, 5);
+    tft.print(timeBuffer);
+  }
+
+  // Prawy dolny róg — etykieta ekranu
+  tft.setTextSize(2);
+  tft.setTextColor(TFT_BLACK);
+  tft.setCursor(screenW - 4 * 12 - 4, screenH - 36);
+  tft.print("APRS");
+  tft.setCursor(screenW - 3 * 12 - 4, screenH - 20);
+  tft.print("MAP");
+
+  // Podpowiedź zoom (chwilowa, po wejściu lub zmianie zoomu)
+  if (millis() < aprsMapHintUntilMs) {
+    const char *topHint = "ZOOM +";
+    const char *botHint = "ZOOM -";
+    int topW = strlen(topHint) * 12;
+    int botW = strlen(botHint) * 12;
+    tft.setTextSize(2);
+    tft.setTextColor(TFT_YELLOW);
+    tft.setCursor((screenW - topW) / 2, 6);
+    tft.print(topHint);
+    tft.setCursor((screenW - botW) / 2, screenH - 20);
+    tft.print(botHint);
+  }
 }
 
 static String extractXmlTagValue(const String &xml, const char* tag) {
@@ -6753,7 +7886,7 @@ void drawWeatherBody() {
   bool fontLoaded = false;
   int descY = 105; // shifted up by 10px
   int descX = 240; // shifted left by 10px
-  if (littleFsReady && LittleFS.exists(ROBOTO_FONT12_FILE)) {
+  if (littleFsReady && LittleFS.exists(ROBOTO_FONT12_FILE) && heapOkForFontLoad()) {
     tft.loadFont(ROBOTO_FONT12_NAME, LittleFS);
     fontLoaded = true;
     tft.setTextColor(TFT_LIGHTGREY);
@@ -7988,6 +9121,7 @@ static void requestUiScreenRedraw(uint8_t pendingScreenId) {
       break;
     case SCREEN_APRS_IS:
     case SCREEN_APRS_RADAR:
+    case SCREEN_APRS_MAP:
       uiPendingScreen6Redraw = true;
       break;
     case SCREEN_POTA_CLUSTER:
@@ -8029,6 +9163,24 @@ void updateScreen1() {
 }
 #endif
 
+// Zwraca czytelny opis przyczyny ostatniego resetu/rozruchu (diagnostyka
+// samoistnych restartów, np. brownout przy słabym zasilaniu USB).
+static const char* resetReasonToString(esp_reset_reason_t reason) {
+  switch (reason) {
+    case ESP_RST_POWERON:   return "POWERON (wlaczenie zasilania)";
+    case ESP_RST_EXT:       return "EXT (reset zewnetrzny/pin RESET)";
+    case ESP_RST_SW:        return "SW (ESP.restart() z kodu)";
+    case ESP_RST_PANIC:     return "PANIC (blad/wyjatek w kodzie)";
+    case ESP_RST_INT_WDT:   return "INT_WDT (watchdog przerwan)";
+    case ESP_RST_TASK_WDT:  return "TASK_WDT (watchdog zadania - kod za dlugo blokowal petle)";
+    case ESP_RST_WDT:       return "WDT (inny watchdog)";
+    case ESP_RST_DEEPSLEEP: return "DEEPSLEEP (wybudzenie)";
+    case ESP_RST_BROWNOUT:  return "BROWNOUT (za slabe zasilanie - sprawdz kabel/zasilacz USB!)";
+    case ESP_RST_SDIO:      return "SDIO";
+    default:                return "UNKNOWN";
+  }
+}
+
 void bootLogLine(const String &line) {
   Serial.println(line);
 #ifdef ENABLE_TFT_DISPLAY
@@ -8038,6 +9190,54 @@ void bootLogLine(const String &line) {
 #endif
   if (bootSequenceActive) {
     delay(500);
+  }
+}
+
+static const char* RESET_LOG_FILE       = "/reset_log.txt";
+static const int   RESET_LOG_MAX_LINES  = 25;
+
+// Dopisuje przyczynę bieżącego rozruchu do trwałego pliku na LittleFS, żeby
+// przetrwała restart i dało się ją sprawdzić później (np. przez /api/reset_log
+// w przeglądarce), bez konieczności siedzenia w monitorze szeregowym w
+// momencie samoistnego resetu. Numer rozruchu trzymany jest w NVS (Preferences),
+// bo przetrwa też sytuacje, w których LittleFS akurat nie wstał.
+static void logResetReasonPersistent(esp_reset_reason_t reason) {
+  Preferences diagPrefs;
+  diagPrefs.begin("diag", false);
+  uint32_t bootCount = diagPrefs.getUInt("bootcnt", 0) + 1;
+  diagPrefs.putUInt("bootcnt", bootCount);
+  diagPrefs.end();
+
+  if (!littleFsReady) return;
+
+  String newLine = "#" + String(bootCount) + " uptime_ms=" + String(millis()) +
+                    " reason=" + resetReasonToString(reason);
+
+  String existing;
+  if (LittleFS.exists(RESET_LOG_FILE)) {
+    File rf = LittleFS.open(RESET_LOG_FILE, "r");
+    if (rf) {
+      existing = rf.readString();
+      rf.close();
+    }
+  }
+
+  // Zachowaj tylko ostatnie RESET_LOG_MAX_LINES linii, żeby plik nie rósł bez końca.
+  int lineCount = 1;
+  int cutIdx = -1;
+  for (int i = (int)existing.length() - 1; i >= 0; i--) {
+    if (existing[i] == '\n') {
+      lineCount++;
+      if (lineCount > RESET_LOG_MAX_LINES) { cutIdx = i + 1; break; }
+    }
+  }
+  if (cutIdx >= 0) existing = existing.substring(cutIdx);
+
+  File wf = LittleFS.open(RESET_LOG_FILE, "w");
+  if (wf) {
+    wf.print(existing);
+    wf.println(newLine);
+    wf.close();
   }
 }
 
@@ -8184,8 +9384,33 @@ String getAPRSSymbolShort(const APRSStation &station) {
   if (raw == "/m") return "MICERPT";
   if (raw == "/n") return "NODE";
   if (raw == "/q") return "GRID";
-  if (raw == "La" || raw == "L_" ) return "LORA";
+  if (raw == "La" || raw == "L_") return "LORA";
   if (raw == "L#" || raw == "L&") return "LORA";
+  // Alternate table base symbols (bez overlay)
+  if (raw == "/&") return "IGATE";
+  if (raw == "/r") return "REPEATER";
+  if (raw == "\\r") return "REPEATER";
+  if (raw == "\\#") return "DIGI";
+  if (raw == "\\_" || raw == "\\W") return "WX";
+  if (raw == "\\s") return "SHIP";
+  if (raw == "/b") return "BIKE";
+  if (raw == "\\k" || raw == "\\u") return "TRUCK";
+  if (raw == "\\v") return "VAN";
+  // Overlay + symbol code — rozpoznaj po kodzie symbolu (2. znak)
+  if (raw.length() == 2) {
+    char ov = raw.charAt(0);
+    char sc = raw.charAt(1);
+    bool isOv = (ov >= 'A' && ov <= 'Z') || (ov >= '0' && ov <= '9');
+    if (isOv) {
+      if (sc == '&') return "IGATE";   // IGate z overlay (np. R&, L&, T&)
+      if (sc == 'a') return "LORA";    // ARRL/ARES/LoRa z overlay
+      if (sc == '#') return "DIGI";    // Digi z overlay
+      if (sc == 'r') return "REPEATER";
+      if (sc == '_') return "WX";
+      if (sc == 'n') return "NODE";
+      if (sc == 's') return "SHIP";
+    }
+  }
   return raw;
 }
 
@@ -8211,6 +9436,8 @@ static String getAprsAlertSymbolDescription(const APRSStation &station) {
   if (symbolShort == "ROVER") return "Rover";
   if (symbolShort == "NODE") return "Node";
   if (symbolShort == "LORA") return "LoRa";
+  if (symbolShort == "IGATE") return "IGate";
+  if (symbolShort == "VAN") return "Van";
   return String("Symbol: ") + symbolShort;
 }
 
@@ -8422,10 +9649,9 @@ static void drawAprsAlertHouseIcon(int centerX, int topY) {
   // Ściany domu (żółte)
   tft.fillRect(bodyX, bodyY, bodyW, bodyH, TFT_YELLOW);
 
-  // Dach dwuspadowy (brązowy)
-  const uint16_t roofColor = TFT_GREEN;
+  // Dach czarny
   int roofTopY = topY;
-  tft.fillTriangle(centerX, roofTopY, bodyX - 3, bodyY + 1, bodyX + bodyW + 3, bodyY + 1, roofColor);
+  tft.fillTriangle(centerX, roofTopY, bodyX - 3, bodyY + 1, bodyX + bodyW + 3, bodyY + 1, TFT_BLACK);
 
   // Drzwi i okna dla czytelności
   tft.fillRect(centerX - 4, bodyY + 12, 8, 12, TFT_DARKGREY);
@@ -8463,6 +9689,134 @@ static void drawAprsAlertHumanIcon(int centerX, int topY) {
   tft.drawLine(headX + 4, headY + 18, headX + 13, headY + 27, bodyColor);
   tft.drawLine(headX + 5, headY + 18, headX - 2, headY + 28, bodyColor);
   tft.drawLine(headX + 5, headY + 18, headX + 14, headY + 27, bodyColor);
+}
+
+// IGate \& — czarny diament z białym "I"
+static void drawAprsAlertIGateIcon(int cx, int topY) {
+  int mid = topY + 16;
+  tft.fillTriangle(cx, topY,      cx - 18, mid, cx + 18, mid, TFT_WHITE);
+  tft.fillTriangle(cx, topY + 32, cx - 18, mid, cx + 18, mid, TFT_WHITE);
+  tft.fillTriangle(cx, topY + 4,  cx - 13, mid, cx + 13, mid, TFT_BLACK);
+  tft.fillTriangle(cx, topY + 28, cx - 13, mid, cx + 13, mid, TFT_BLACK);
+  // "I" jako prymityw - idealne wyśrodkowanie bez zależności od metryk fontu
+  tft.fillRect(cx - 4, mid - 7, 9, 2, TFT_WHITE);  // górny serif
+  tft.fillRect(cx - 1, mid - 5, 3, 10, TFT_WHITE); // trzon
+  tft.fillRect(cx - 4, mid + 5, 9, 2, TFT_WHITE);  // dolny serif
+}
+
+// LoRa \a — ciemniejsza zielona gwiazda 6-ramienna z "L" (bez okręgu)
+static void drawAprsAlertLoraIcon(int cx, int topY) {
+  const uint16_t c = 0x0400;  // ciemniejszy zielony
+  tft.fillTriangle(cx, topY + 2,  cx - 12, topY + 23, cx + 12, topY + 23, c);
+  tft.fillTriangle(cx, topY + 30, cx - 12, topY + 9,  cx + 12, topY + 9,  c);
+  tft.setTextColor(TFT_WHITE);
+  tft.setTextSize(1);
+  tft.setTextDatum(MC_DATUM);
+  tft.drawString("L", cx, topY + 16);
+  tft.setTextDatum(TL_DATUM);
+}
+
+// WX /_ — niebieski okrąg z napisem Wx
+static void drawAprsAlertWxIcon(int cx, int topY) {
+  tft.fillCircle(cx, topY + 16, 18, TFT_BLUE);
+  tft.setTextColor(TFT_WHITE);
+  tft.setTextSize(1);
+  tft.setTextDatum(MC_DATUM);
+  tft.drawString("Wx", cx, topY + 16);
+  tft.setTextDatum(TL_DATUM);
+}
+
+// Digi /# — zielona 6-ramienna gwiazda (Star of David) z białym środkiem i zielonym punktem
+static void drawAprsAlertDigiIcon(int cx, int topY) {
+  const uint16_t c = TFT_GREEN;
+  tft.fillTriangle(cx, topY + 2,  cx - 12, topY + 23, cx + 12, topY + 23, c);
+  tft.fillTriangle(cx, topY + 30, cx - 12, topY + 9,  cx + 12, topY + 9,  c);
+  tft.fillCircle(cx, topY + 16, 7, TFT_WHITE);
+  tft.fillCircle(cx, topY + 16, 3, c);
+}
+
+// Repeater /r — czerwona wieża antenowa z odciągami
+static void drawAprsAlertRepeaterIcon(int cx, int topY) {
+  const uint16_t c = TFT_RED;
+  // Maszt pionowy
+  tft.fillRect(cx - 2, topY + 6, 4, 24, c);
+  // Poprzeczka pozioma (antena)
+  tft.drawFastHLine(cx - 10, topY + 6, 21, c);
+  tft.drawFastVLine(cx - 10, topY + 3, 5, c);
+  tft.drawFastVLine(cx + 10, topY + 3, 5, c);
+  // Odciągi ukośne
+  tft.drawLine(cx, topY + 12, cx - 14, topY + 28, c);
+  tft.drawLine(cx, topY + 12, cx + 14, topY + 28, c);
+  // Podstawa
+  tft.drawFastHLine(cx - 14, topY + 30, 29, c);
+}
+
+// Bike /b — rower biały: dwa koła + tylny trójkąt + rama diamentowa + widelec
+static void drawAprsAlertBikeIcon(int cx, int topY) {
+  const uint16_t c = TFT_WHITE;
+  const int wy  = topY + 22;   // oś kół Y
+  const int lx  = cx - 15;    // tylne koło X
+  const int rx  = cx + 15;    // przednie koło X
+  const int bbx = cx - 2;     // suport X
+  const int bby = wy;          // suport Y
+  const int stx = cx - 8;     // szczyt rury siodłowej X
+  const int sty = topY + 8;   // szczyt rury siodłowej Y
+  const int htx = cx + 9;     // głowica ramy X
+  const int hty = topY + 10;  // głowica ramy Y
+
+  // Koła
+  tft.drawCircle(lx, wy, 10, c);
+  tft.drawCircle(rx, wy, 10, c);
+
+  // Tylny trójkąt: tylna oś → suport, tylna oś → szczyt rury siodłowej, suport → szczyt
+  tft.drawLine(lx,  wy,  bbx, bby, c);
+  tft.drawLine(lx,  wy,  stx, sty, c);
+  tft.drawLine(bbx, bby, stx, sty, c);
+
+  // Główna rama: rura dolna (suport→głowica), rura górna (szczyt→głowica)
+  tft.drawLine(bbx, bby, htx, hty, c);
+  tft.drawLine(stx, sty, htx, hty, c);
+
+  // Widelec: głowica → przednia oś
+  tft.drawLine(htx, hty, rx, wy, c);
+
+  // Siodełko
+  tft.drawFastHLine(stx - 6, sty - 1, 10, c);
+
+  // Kierownica: trzon pionowy + poprzeczka
+  tft.drawFastVLine(htx, hty - 4, 5, c);
+  tft.drawFastHLine(htx - 3, hty - 4, 8, c);
+}
+
+// Truck /k /u — ciężarówka z boku
+static void drawAprsAlertTruckIcon(int cx, int topY, uint16_t color) {
+  // Nadwozie ładunkowe
+  tft.fillRect(cx - 26, topY + 8, 32, 14, color);
+  // Kabina
+  tft.fillRoundRect(cx + 5, topY + 11, 14, 11, 2, color);
+  // Okno kabiny
+  tft.fillRect(cx + 7, topY + 13, 9, 5, 0x051F);
+  // Koła
+  tft.fillCircle(cx - 14, topY + 24, 6, TFT_DARKGREY);
+  tft.fillCircle(cx + 4,  topY + 24, 6, TFT_DARKGREY);
+  tft.fillCircle(cx + 16, topY + 24, 6, TFT_DARKGREY);
+  tft.fillCircle(cx - 14, topY + 24, 3, TFT_LIGHTGREY);
+  tft.fillCircle(cx + 4,  topY + 24, 3, TFT_LIGHTGREY);
+  tft.fillCircle(cx + 16, topY + 24, 3, TFT_LIGHTGREY);
+}
+
+// Ship /s — łódź motorowa z boku
+static void drawAprsAlertShipIcon(int cx, int topY) {
+  const uint16_t hull = 0x024F;  // ciemnoniebieski
+  // Kadłub (prostokąt + dziób i rufa jako trójkąty)
+  tft.fillRect(cx - 20, topY + 16, 40, 10, hull);
+  tft.fillTriangle(cx + 20, topY + 16, cx + 20, topY + 26, cx + 28, topY + 26, hull);
+  tft.fillTriangle(cx - 20, topY + 26, cx - 28, topY + 26, cx - 20, topY + 16, hull);
+  // Nadbudówka
+  tft.fillRect(cx - 8, topY + 8, 20, 10, TFT_LIGHTGREY);
+  // Maszt
+  tft.drawFastVLine(cx, topY + 2, 8, TFT_DARKGREY);
+  tft.drawFastHLine(cx - 4, topY + 2, 8, TFT_DARKGREY);
 }
 
 static void drawAprsAlertCompass(int centerX, int centerY, int radius, bool hasBearing, float bearingDeg) {
@@ -8560,6 +9914,7 @@ static void dismissAprsAlertScreen() {
     return;
   }
   aprsAlertScreenActive = false;
+  digitalWrite(BUZZER_PIN, LOW);
   drawScreen(currentScreen);
   if (currentScreen == SCREEN_HAM_CLOCK) {
     updateScreen1();
@@ -8580,6 +9935,8 @@ static void initStatusRgbLed() {
   pinMode(RGB_LED_RED_PIN, OUTPUT);
   pinMode(RGB_LED_GREEN_PIN, OUTPUT);
   pinMode(RGB_LED_BLUE_PIN, OUTPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
 
   rgbLedPrevWifiConnected = false;
   rgbRedBlinkLastToggleMs = millis();
@@ -8657,6 +10014,7 @@ void ALERT_Screen(const APRSStation &station) {
   aprsAlertScreenUntilMs = millis() + ((unsigned long)aprsAlertScreenSeconds * 1000UL);
   aprsAlertFrameLastToggleMs = millis();
   aprsAlertFramePulseOn = true;
+  digitalWrite(BUZZER_PIN, HIGH);
 
   tft.fillScreen(TFT_BLACK);
   tft.fillRect(0, 0, 320, 40, TFT_RADIO_ORANGE);
@@ -8682,11 +10040,8 @@ void ALERT_Screen(const APRSStation &station) {
 
   tft.setTextColor(TFT_WHITE);
   tft.setTextSize(4);
-  int callX = (320 - (callsign.length() * 24)) / 2;
-  if (callX < 15) {
-    callX = 15;
-  }
-  callX += 20;
+  int callX = (320 - (int)(callsign.length() * 24)) / 2;
+  if (callX < 15) callX = 15;
   tft.setCursor(callX, 65);
   tft.print(callsign);
 
@@ -8696,11 +10051,8 @@ void ALERT_Screen(const APRSStation &station) {
   }
   tft.setTextColor(TFT_LIGHTGREY);
   tft.setTextSize(2);
-  int freqX = (320 - (freqText.length() * 12)) / 2;
-  freqX += 20;
-  if (freqX < 12) {
-    freqX = 12;
-  }
+  int freqX = (320 - (int)(freqText.length() * 12)) / 2;
+  if (freqX < 12) freqX = 12;
   tft.setCursor(freqX, 106);
   tft.print(freqText);
 
@@ -8713,9 +10065,11 @@ void ALERT_Screen(const APRSStation &station) {
   const int compassR = 24;
   bool hasBearing = false;
   float bearingDeg = 0.0f;
-  if (userLatLonValid && station.hasLatLon) {
+  double alertLat, alertLon;
+  bool alertPosValid = getEffectiveAprsPosition(alertLat, alertLon);
+  if (alertPosValid && station.hasLatLon) {
     hasBearing = true;
-    bearingDeg = calculateBearing(userLat, userLon, (double)station.lat, (double)station.lon);
+    bearingDeg = calculateBearing(alertLat, alertLon, (double)station.lat, (double)station.lon);
   }
   drawAprsAlertCompass(compassX, compassY, compassR, hasBearing, bearingDeg);
 
@@ -8791,7 +10145,7 @@ void ALERT_Screen(const APRSStation &station) {
 
     int tempLabelW = (int)labelTempWithColon.length() * 6;
     int humidityLabelW = (int)labelHumidityWithColon.length() * 6;
-    if (littleFsReady && LittleFS.exists(ROBOTO_FONT12_FILE)) {
+    if (littleFsReady && LittleFS.exists(ROBOTO_FONT12_FILE) && heapOkForFontLoad()) {
       tft.loadFont(ROBOTO_FONT12_NAME, LittleFS);
       tft.setTextDatum(TL_DATUM);
       tft.setTextColor(TFT_WHITE);
@@ -8858,6 +10212,22 @@ void ALERT_Screen(const APRSStation &station) {
       drawAprsAlertHouseIcon(160, 136);
     } else if (iconShort == "HUMAN") {
       drawAprsAlertHumanIcon(160, 136);
+    } else if (iconShort == "IGATE") {
+      drawAprsAlertIGateIcon(160, 136);
+    } else if (iconShort == "LORA") {
+      drawAprsAlertLoraIcon(160, 136);
+    } else if (iconShort == "WX") {
+      drawAprsAlertWxIcon(160, 136);
+    } else if (iconShort == "DIGI") {
+      drawAprsAlertDigiIcon(160, 136);
+    } else if (iconShort == "REPEATER") {
+      drawAprsAlertRepeaterIcon(160, 136);
+    } else if (iconShort == "BIKE") {
+      drawAprsAlertBikeIcon(160, 136);
+    } else if (iconShort == "TRUCK" || iconShort == "VAN") {
+      drawAprsAlertTruckIcon(160, 140, iconColor);
+    } else if (iconShort == "SHIP") {
+      drawAprsAlertShipIcon(160, 136);
     } else {
       tft.setCursor(iconX, 153);
       tft.print(iconDescription);
@@ -8883,6 +10253,7 @@ void updateAlertScreenTimeout() {
     aprsAlertFrameLastToggleMs = nowMs;
     aprsAlertFramePulseOn = !aprsAlertFramePulseOn;
     drawAprsAlertFrame(aprsAlertFramePulseOn);
+    if (!aprsAlertFramePulseOn) digitalWrite(BUZZER_PIN, LOW);
   }
 
   if ((long)(millis() - aprsAlertScreenUntilMs) < 0) {
@@ -9483,6 +10854,257 @@ float calculateBearing(double lat1, double lon1, double lat2, double lon2) {
     return (float)bearingDeg;
 }
 
+// ========== RADAR SAMOLOTÓW - śledzenie i pobieranie danych (OpenSky Network) ==========
+
+// Dead-reckoning: przewiduje aktualną pozycję na podstawie ostatniej znanej prędkości/kursu.
+static void aircraftPredictPosition(const AircraftEntry &ac, float &outLat, float &outLon) {
+  float dataAgeOnArrival = 0.0f;
+  if (ac.timePosition > 0 && ac.lastContact > 0) {
+    dataAgeOnArrival = (float)(ac.lastContact - ac.timePosition);
+  }
+  float localElapsed = (millis() - ac.lastSeenMs) / 1000.0f;
+  float dt = localElapsed + dataAgeOnArrival;
+
+  float headingRad = radians(ac.trueTrack);
+  const float latMetersPerDeg = 111320.0f;
+  float deltaLat = (ac.velocity * dt * cos(headingRad)) / latMetersPerDeg;
+  float deltaLon = (ac.velocity * dt * sin(headingRad)) / (latMetersPerDeg * cos(radians(ac.lat)));
+
+  outLat = ac.lat + deltaLat;
+  outLon = ac.lon + deltaLon;
+}
+
+// Aktualizuje płynne przejście (blend) między starą a nową pozycją; wołane raz na klatkę rysowania.
+static void aircraftTick(AircraftEntry &ac, unsigned long now) {
+  float deltaSeconds = (ac.lastTickMs == 0) ? 0.0f : (now - ac.lastTickMs) / 1000.0f;
+  ac.lastTickMs = now;
+  const float blendSpeed = 0.15f; // niżej = wolniej, wyżej = szybciej
+  ac.blendAlpha = min(ac.blendAlpha + deltaSeconds * blendSpeed, 1.0f);
+}
+
+static void aircraftGetDisplayPosition(const AircraftEntry &ac, float &outLat, float &outLon) {
+  float deadLat, deadLon;
+  aircraftPredictPosition(ac, deadLat, deadLon);
+
+  if (ac.blendAlpha >= 1.0f) {
+    outLat = deadLat;
+    outLon = deadLon;
+    return;
+  }
+
+  float t = ac.blendAlpha * ac.blendAlpha * (3.0f - 2.0f * ac.blendAlpha); // ease-in-out
+  outLat = ac.blendFromLat + t * (deadLat - ac.blendFromLat);
+  outLon = ac.blendFromLon + t * (deadLon - ac.blendFromLon);
+}
+
+// Znajduje istniejący wpis po icao24 albo zwraca wolny slot (isNew=true); nullptr jeśli tablica pełna.
+static AircraftEntry* findAircraftSlot(const String &icao24, bool &isNew) {
+  int freeSlot = -1;
+  for (int i = 0; i < MAX_AIRCRAFT; i++) {
+    if (aircraftEntries[i].active && aircraftEntries[i].icao24 == icao24) {
+      isNew = false;
+      return &aircraftEntries[i];
+    }
+    if (!aircraftEntries[i].active && freeSlot < 0) {
+      freeSlot = i;
+    }
+  }
+  isNew = true;
+  if (freeSlot < 0) return nullptr;
+  return &aircraftEntries[freeSlot];
+}
+
+// Pobiera (lub odświeża) token Bearer OAuth2 dla OpenSky API (client_credentials).
+// Zwraca pusty String jeśli dane logowania nie są ustawione albo żądanie się nie powiodło —
+// wtedy fetchAircraftData() po prostu pyta API anonimowo (niższy dzienny limit zapytań).
+String getOpenSkyBearerToken() {
+  if (openSkyClientId.isEmpty() || openSkyClientSecret.isEmpty()) {
+    return "";
+  }
+  if (!openSkyBearerToken.isEmpty() && millis() < openSkyTokenExpiryMs) {
+    return openSkyBearerToken;
+  }
+
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+  http.setTimeout(8000);
+  if (!http.begin(client, "https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token")) {
+    return "";
+  }
+  http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+
+  String body = "grant_type=client_credentials";
+  body += "&client_id=" + openSkyClientId;
+  body += "&client_secret=" + openSkyClientSecret;
+
+  int httpCode = http.POST(body);
+  if (httpCode != HTTP_CODE_OK) {
+    Serial.printf("[OpenSky] Zadanie o token nieudane, HTTP %d\n", httpCode);
+    http.end();
+    return "";
+  }
+
+  DynamicJsonDocument doc(1024);
+  DeserializationError err = deserializeJson(doc, http.getStream());
+  http.end();
+  if (err || !doc["access_token"].is<const char*>()) {
+    Serial.println("[OpenSky] Nie udalo sie sparsowac odpowiedzi z tokenem");
+    return "";
+  }
+
+  openSkyBearerToken = doc["access_token"].as<String>();
+  openSkyTokenExpiryMs = millis() + (29UL * 60UL * 1000UL); // token wazny 30 min, 1 min zapasu
+  return openSkyBearerToken;
+}
+
+// Odpytuje darmowe, publiczne API adsb.lol (bez tokenu/rejestracji, bez wymogu
+// wlasnego odbiornika ADS-B - w przeciwienstwie do OpenSky) o samoloty w promieniu
+// wokol pozycji stacji i aktualizuje aircraftEntries[].
+bool fetchAircraftData() {
+  if (WiFi.status() != WL_CONNECTED) {
+    lastAircraftFetchStatus = "brak WiFi";
+    return false;
+  }
+
+  double homeLat, homeLon;
+  if (!getEffectiveAprsPosition(homeLat, homeLon)) {
+    lastAircraftFetchStatus = "brak pozycji stacji";
+    return false;
+  }
+  lastAircraftQueryLat = homeLat;
+  lastAircraftQueryLon = homeLon;
+
+  float radiusKm = aircraftRadarRadiusKm;
+  // adsb.lol /v2/point/ (format jak airplanes.live, ktore od 11.2026 daje 403) przyjmuje promien w milach morskich, max ok. 250nm.
+  float radiusNm = min(250.0f, radiusKm / 1.852f);
+
+  aircraftFetchIntervalMs = 15000UL; // grzecznie wobec darmowego publicznego API
+
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+  http.setTimeout(20000);
+
+  String url = "https://api.adsb.lol/v2/point/" + String(homeLat, 6) + "/" +
+                String(homeLon, 6) + "/" + String(radiusNm, 1);
+
+  if (!http.begin(client, url)) {
+    lastAircraftFetchStatus = "blad polaczenia HTTP";
+    return false;
+  }
+  http.addHeader("User-Agent", "ESP32-HAM-CLOCK-aircraft-radar");
+
+  int httpCode = http.GET();
+  if (httpCode != HTTP_CODE_OK) {
+    Serial.printf("[adsb.lol] zapytanie nieudane, HTTP %d\n", httpCode);
+    lastAircraftFetchStatus = "blad HTTP " + String(httpCode);
+    http.end();
+    return false;
+  }
+
+  // Kazdy samolot ma ~45 pol, a uzywamy kilku - filtr oszczedza sterte (CYD bez PSRAM).
+  JsonDocument filter;
+  JsonObject acFilter = filter["ac"][0].to<JsonObject>();
+  acFilter["hex"] = true;
+  acFilter["lat"] = true;
+  acFilter["lon"] = true;
+  acFilter["alt_baro"] = true;
+  acFilter["gs"] = true;
+  acFilter["seen_pos"] = true;
+  acFilter["seen"] = true;
+  acFilter["flight"] = true;
+  acFilter["track"] = true;
+
+  JsonDocument doc;
+  DeserializationError err = deserializeJson(doc, http.getStream(), DeserializationOption::Filter(filter));
+  http.end();
+  if (err) {
+    Serial.print("[adsb.lol] Blad parsowania JSON: ");
+    Serial.println(err.f_str());
+    lastAircraftFetchStatus = String("blad JSON: ") + err.c_str();
+    return false;
+  }
+
+  JsonArray states = doc["ac"].as<JsonArray>();
+  unsigned long now = millis();
+
+  bool seenThisCycle[MAX_AIRCRAFT] = {false};
+
+  if (!states.isNull()) {
+    for (JsonObject state : states) {
+      if (state.isNull()) continue;
+      String icao24 = state["hex"].isNull() ? "" : state["hex"].as<String>();
+      if (icao24.isEmpty()) continue;
+
+      bool isNew = false;
+      AircraftEntry* slot = findAircraftSlot(icao24, isNew);
+      if (slot == nullptr) continue; // tablica pelna, pomijamy ten samolot
+
+      float newLat = state["lat"].isNull() ? slot->lat : state["lat"].as<float>();
+      float newLon = state["lon"].isNull() ? slot->lon : state["lon"].as<float>();
+
+      // alt_baro bywa liczba (stopy) albo tekstem "ground" gdy samolot jest na ziemi.
+      bool onGround = false;
+      float altitudeM = slot->baroAltitude;
+      JsonVariant altVar = state["alt_baro"];
+      if (altVar.is<const char*>()) {
+        onGround = true;
+      } else if (!altVar.isNull()) {
+        altitudeM = altVar.as<float>() * 0.3048f; // stopy -> metry
+      }
+
+      float velocityMps = state["gs"].isNull() ? 0.0f : state["gs"].as<float>() * 0.514444f; // wezly -> m/s
+      float seenPos = !state["seen_pos"].isNull() ? state["seen_pos"].as<float>()
+                     : (!state["seen"].isNull() ? state["seen"].as<float>() : 0.0f);
+
+      if (isNew) {
+        slot->icao24 = icao24;
+        slot->blendFromLat = newLat;
+        slot->blendFromLon = newLon;
+        slot->blendAlpha = 1.0f;
+        slot->lastTickMs = 0;
+        aircraftCount++;
+      } else {
+        float curLat, curLon;
+        aircraftGetDisplayPosition(*slot, curLat, curLon);
+        slot->blendFromLat = curLat;
+        slot->blendFromLon = curLon;
+        slot->blendAlpha = 0.0f;
+      }
+
+      slot->callsign = state["flight"].isNull() ? "" : state["flight"].as<String>();
+      slot->callsign.trim();
+      slot->timePosition = 0;
+      slot->lastContact = 0;
+      slot->lon = newLon;
+      slot->lat = newLat;
+      slot->baroAltitude = altitudeM;
+      slot->onGround = onGround;
+      slot->velocity = velocityMps;
+      slot->trueTrack = state["track"].isNull() ? 0.0f : state["track"].as<float>();
+      unsigned long ageMs = (unsigned long)(seenPos * 1000.0f);
+      slot->lastSeenMs = (ageMs < now) ? (now - ageMs) : 0;
+      slot->active = true;
+
+      int slotIndex = (int)(slot - aircraftEntries);
+      seenThisCycle[slotIndex] = true;
+    }
+  }
+
+  // Usun samoloty ktore zniknely z feedu (nie byly obecne w tej odpowiedzi API)
+  for (int i = 0; i < MAX_AIRCRAFT; i++) {
+    if (aircraftEntries[i].active && !seenThisCycle[i]) {
+      aircraftEntries[i].active = false;
+      aircraftCount--;
+    }
+  }
+
+  String rawInfo = states.isNull() ? "NULL" : ("arr" + String(states.size()));
+  lastAircraftFetchStatus = "OK " + String(aircraftCount) + " " + rawInfo + " r=" + String((int)radiusKm) + "km";
+  return true;
+}
+
 String formatDistanceOrCountry(const DXSpot &spot, size_t maxLen) {
   if (spot.country.length() > 0) {
     String c = spot.country;
@@ -9885,59 +11507,37 @@ void enqueueQrzLookup(const String &callsign) {
 // Pobierz spoty POTA z publicznego API i uzupełnij bufor + kolejkę QRZ
 bool fetchPotaApi() {
   if (!wifiConnected) return false;
-  auto decodeToSpots = [&](JsonDocument &doc) -> bool {
-    JsonArray arr;
-    if (doc.is<JsonArray>()) {
-      arr = doc.as<JsonArray>();
-    } else if (doc["spots"].is<JsonArray>()) {
-      arr = doc["spots"].as<JsonArray>();
+  // Przepisuje jeden obiekt spotu z api.pota.app do DXSpot.
+  auto spotFromJson = [](JsonObject spot, DXSpot &s) {
+    s.time = spot["activatorLastSpotTime"] | spot["spotTime"] | "";
+    s.callsign = spot["activator"] | spot["call"] | spot["callsign"] | "";
+    float freq = 0.0f;
+    if (spot["frequency"].is<float>() || spot["frequency"].is<double>()) {
+      freq = spot["frequency"].as<float>();
+    } else if (spot["frequency"].is<int>() || spot["frequency"].is<long>()) {
+      freq = (float)spot["frequency"].as<long>();
+    } else if (spot["frequency"].is<const char*>() || spot["frequency"].is<String>()) {
+      String fstr = spot["frequency"].as<String>();
+      freq = fstr.toFloat();
     }
-    if (arr.isNull() || arr.size() == 0) {
-      return false;
+    if (freq > 0) {
+      s.frequency = freq / 1000.0f;
+    } else {
+      s.frequency = 0.0f;
     }
-
-    lockPotaSpots();
-    potaSpotCount = 0;
-    for (JsonObject spot : arr) {
-      if (potaSpotCount >= MAX_POTA_SPOTS) break;
-      DXSpot s;
-      s.time = spot["activatorLastSpotTime"] | spot["spotTime"] | "";
-      s.callsign = spot["activator"] | spot["call"] | spot["callsign"] | "";
-      float freq = 0.0f;
-      if (spot["frequency"].is<float>() || spot["frequency"].is<double>()) {
-        freq = spot["frequency"].as<float>();
-      } else if (spot["frequency"].is<int>() || spot["frequency"].is<long>()) {
-        freq = (float)spot["frequency"].as<long>();
-      } else if (spot["frequency"].is<const char*>() || spot["frequency"].is<String>()) {
-        String fstr = spot["frequency"].as<String>();
-        freq = fstr.toFloat();
-      }
-      if (freq > 0) {
-        s.frequency = freq / 1000.0f;
-      } else {
-        s.frequency = 0.0f;
-      }
-      s.band = getBand(s.frequency);
-      s.mode = spot["mode"] | "";
-      s.mode.toUpperCase();
-      if (s.mode.length() == 0) {
-        s.mode = getMode(spot["comments"] | "");
-      }
-      s.country = spot["country"] | "";
-      s.spotter = spot["spotter"] | "";
-      s.comment = spot["comments"] | "";
-      s.distance = 0;
-      s.hasLatLon = false;
-      applyQrzCacheToSpot(s, QRZ_CACHE_TTL_MS);
-      compactDxSpotStrings(s);
-      potaSpots[potaSpotCount++] = s;
-      if (s.country.length() == 0 && s.callsign.length() > 0) {
-        enqueueQrzLookup(s.callsign);
-      }
+    s.band = getBand(s.frequency);
+    s.mode = spot["mode"] | "";
+    s.mode.toUpperCase();
+    if (s.mode.length() == 0) {
+      s.mode = getMode(spot["comments"] | "");
     }
-    bool hasPotaSpots = potaSpotCount > 0;
-    unlockPotaSpots();
-    return hasPotaSpots;
+    s.country = spot["country"] | "";
+    s.spotter = spot["spotter"] | "";
+    s.comment = spot["comments"] | "";
+    s.distance = 0;
+    s.hasLatLon = false;
+    applyQrzCacheToSpot(s, QRZ_CACHE_TTL_MS);
+    compactDxSpotStrings(s);
   };
 
   HTTPClient http;
@@ -9954,64 +11554,58 @@ bool fetchPotaApi() {
     return false;
   }
   int contentLength = http.getSize();
-  Serial.print("[POTA] HTTP ");
-  Serial.print(code);
-  Serial.print(", content-length=");
-  Serial.print(contentLength);
-  Serial.println(" (may be -1 if chunked)");
+  Serial.printf("[POTA] HTTP %d, content-length=%d, heap=%u, max blok=%u\n",
+                code, contentLength, ESP.getFreeHeap(), ESP.getMaxAllocHeap());
 
+  // Tablica ma ok. 70 spotow (~45 KB). Na CYD bez PSRAM parsowanie calosci naraz
+  // konczylo sie IncompleteInput/NoMemory, wiec czytamy ja po jednym obiekcie
+  // i konczymy po MAX_POTA_SPOTS (API zwraca najnowsze spoty na poczatku).
+  JsonDocument filter;
+  filter["activatorLastSpotTime"] = true;
+  filter["spotTime"] = true;
+  filter["activator"] = true;
+  filter["call"] = true;
+  filter["callsign"] = true;
+  filter["frequency"] = true;
+  filter["mode"] = true;
+  filter["country"] = true;
+  filter["spotter"] = true;
+  filter["comments"] = true;
+
+  std::unique_ptr<DXSpot[]> fresh(new (std::nothrow) DXSpot[MAX_POTA_SPOTS]);
+  if (!fresh) {
+    Serial.println("[POTA] Brak pamieci na bufor spotow");
+    http.end();
+    return false;
+  }
+  int freshCount = 0;
+  DeserializationError err;
   WiFiClient *stream = http.getStreamPtr();
-  DynamicJsonDocument filter(512);
-  JsonObject filterRootArray = filter[0].to<JsonObject>();
-  filterRootArray["activatorLastSpotTime"] = true;
-  filterRootArray["spotTime"] = true;
-  filterRootArray["activator"] = true;
-  filterRootArray["call"] = true;
-  filterRootArray["callsign"] = true;
-  filterRootArray["frequency"] = true;
-  filterRootArray["mode"] = true;
-  filterRootArray["country"] = true;
-  filterRootArray["spotter"] = true;
-  filterRootArray["comments"] = true;
-
-  DynamicJsonDocument doc(60000);
-  DeserializationError err = deserializeJson(doc, *stream, DeserializationOption::Filter(filter));
+  if (stream->find("[")) {
+    do {
+      JsonDocument spotDoc;
+      err = deserializeJson(spotDoc, *stream, DeserializationOption::Filter(filter));
+      if (err) break;
+      spotFromJson(spotDoc.as<JsonObject>(), fresh[freshCount++]);
+    } while (freshCount < MAX_POTA_SPOTS && stream->findUntil(",", "]"));
+  } else {
+    Serial.println("[POTA] Brak tablicy JSON w odpowiedzi");
+  }
   http.end();
-  bool parsedOk = (!err && decodeToSpots(doc));
-  if (!parsedOk) {
-    if (err) {
-      Serial.print("[POTA] Filtered JSON parse error: ");
-      Serial.println(err.c_str());
-    }
-    Serial.println("[POTA] Filtered parse empty - retrying without filter");
 
-    HTTPClient retry;
-    retry.setTimeout(8000);
-    if (!retry.begin(potaApiUrl)) {
-      return false;
-    }
-    int retryCode = retry.GET();
-    if (retryCode != HTTP_CODE_OK) {
-      retry.end();
-      return false;
-    }
-    WiFiClient *retryStream = retry.getStreamPtr();
-    DynamicJsonDocument fullDoc(120000);
-    DeserializationError retryErr = deserializeJson(fullDoc, *retryStream);
-    retry.end();
-    if (retryErr) {
-      Serial.print("[POTA] Fallback JSON parse error: ");
-      Serial.println(retryErr.c_str());
-      return false;
-    }
-    if (!decodeToSpots(fullDoc)) {
-      Serial.println("[POTA] Fallback parse also returned 0 spots");
-      return false;
-    }
+  if (err) {
+    Serial.printf("[POTA] Blad JSON po %d spotach: %s\n", freshCount, err.c_str());
+  }
+  if (freshCount == 0) {
+    return false;
   }
 
-  // Posortuj malejąco po czasie (ISO string porównuje się leksykograficznie poprawnie)
   lockPotaSpots();
+  potaSpotCount = 0;
+  for (int i = 0; i < freshCount; i++) {
+    potaSpots[potaSpotCount++] = fresh[i];
+  }
+  // Posortuj malejąco po czasie (ISO string porównuje się leksykograficznie poprawnie)
   for (int i = 0; i < potaSpotCount - 1; i++) {
     for (int j = i + 1; j < potaSpotCount; j++) {
       if (potaSpots[j].time > potaSpots[i].time) {
@@ -10024,6 +11618,12 @@ bool fetchPotaApi() {
   bool hasPotaSpots = potaSpotCount > 0;
   unlockPotaSpots();
 
+  for (int i = 0; i < freshCount; i++) {
+    if (fresh[i].country.length() == 0 && fresh[i].callsign.length() > 0) {
+      enqueueQrzLookup(fresh[i].callsign);
+    }
+  }
+  Serial.printf("[POTA] OK, spotow: %d\n", freshCount);
   return hasPotaSpots;
 }
 
@@ -10922,6 +12522,29 @@ static String getAprsTxCallsignWithSsid() {
   return baseCall + "-" + String(aprsSsid);
 }
 
+static String sanitizeBeaconLocationName(const String &raw) {
+  String s = raw;
+  s.trim();
+  String out = "";
+  for (size_t i = 0; i < s.length(); i++) {
+    char c = s.charAt(i);
+    if (c >= 32 && c <= 126) {
+      out += c;
+    }
+    if (out.length() >= 16) {
+      break;
+    }
+  }
+  return out;
+}
+
+String getBeaconLocationLabel(int idx) {
+  if (idx < 0 || idx >= APRS_BEACON_LOCATIONS_COUNT || aprsBeaconLocations[idx].name.length() == 0) {
+    return String("Domyslne");
+  }
+  return aprsBeaconLocations[idx].name;
+}
+
 static String sanitizeAprsComment(const String &cmt) {
   String s = cmt;
   s.trim();
@@ -11189,11 +12812,29 @@ bool isAprsTxCallValid(const String &call) {
   return c.length() > 0 && c != "NOCALL";
 }
 
+// Zwraca pozycję "mojej stacji" używaną do beaconu, radaru i namiarów:
+// wybraną lokalizację beaconu, jeśli ustawiono, w przeciwnym razie domyślną pozycję GPS.
+bool getEffectiveAprsPosition(double &lat, double &lon) {
+  if (aprsBeaconLocationIndex >= 0 && aprsBeaconLocationIndex < APRS_BEACON_LOCATIONS_COUNT &&
+      aprsBeaconLocations[aprsBeaconLocationIndex].name.length() > 0) {
+    lat = aprsBeaconLocations[aprsBeaconLocationIndex].lat;
+    lon = aprsBeaconLocations[aprsBeaconLocationIndex].lon;
+    return true;
+  }
+  lat = userLat;
+  lon = userLon;
+  return userLatLonValid;
+}
+
 void sendAprsPosition() {
   if (!aprsBeaconEnabled || !aprsConnected || !aprsClient.connected() || !aprsLoginSent) {
     return;
   }
-  if (!userLatLonValid) {
+
+  double txLat, txLon;
+  bool haveCoords = getEffectiveAprsPosition(txLat, txLon);
+
+  if (!haveCoords) {
     Serial.println("[APRS] Pomijam TX pozycji - brak poprawnych współrzędnych użytkownika");
     return;
   }
@@ -11206,8 +12847,8 @@ void sendAprsPosition() {
   }
   txCallsign.toUpperCase();
 
-  String latStr = formatAprsCoordinate(userLat, true);
-  String lonStr = formatAprsCoordinate(userLon, false);
+  String latStr = formatAprsCoordinate(txLat, true);
+  String lonStr = formatAprsCoordinate(txLon, false);
 
   String frame = txCallsign;
   frame += ">APRS,TCPIP*:";
@@ -11566,8 +13207,11 @@ bool parseAPRSFrame(String line, APRSStation &station) {
   // UĹĽywamy wspĂłĹ‚rzÄ™dnych z sekcji "Moja Stacja"
   if (station.hasLatLon) {
     // UĹĽyj double dla wiÄ™kszej precyzji obliczeĹ„
-    double userLatForDistance = userLatLonValid ? userLat : 52.40;  // Fallback jeĹ›li nie ustawione
-    double userLonForDistance = userLatLonValid ? userLon : 16.92;
+    double userLatForDistance, userLonForDistance;
+    if (!getEffectiveAprsPosition(userLatForDistance, userLonForDistance)) {
+      userLatForDistance = 52.40;  // Fallback jeĹ›li nie ustawione
+      userLonForDistance = 16.92;
+    }
     double stationLat = (double)station.lat;
     double stationLon = (double)station.lon;
     
@@ -11582,6 +13226,7 @@ bool parseAPRSFrame(String line, APRSStation &station) {
 
 // Dodaj nowÄ… stacjÄ™ APRS do tablicy (bez duplikatĂłw - aktualizuje istniejÄ…ce)
 void addAPRSStation(APRSStation station) {
+  station.receivedAtMs = millis();
   compactAprsStationStrings(station);
   LOGV_PRINT("[APRS] addAPRSStation: ");
   LOGV_PRINT(station.callsign);
@@ -12344,6 +13989,15 @@ void loadPreferences() {
   yield();
   openWebRxUrl = preferences->getString("openwebrx_url", DEFAULT_OPENWEBRX_URL);
   yield();
+  aircraftRadarRadiusKm = preferences->getFloat("aircraft_radius", 50.0f);
+  openSkyClientId = preferences->getString("opensky_id", "");
+  openSkyClientId.trim();
+  openSkyClientSecret = preferences->getString("opensky_secret", "");
+  openSkyClientSecret.trim();
+  aircraftShowScanline = preferences->getBool("aircraft_scan", true);
+  aircraftShowInfoText = preferences->getBool("aircraft_info", true);
+  aircraftShowDirectionIcon = preferences->getBool("aircraft_dir", true);
+  yield();
   backlightPercent = preferences->getInt("tft_backlight", TFT_BACKLIGHT);
   if (backlightPercent < MIN_BACKLIGHT_PERCENT) backlightPercent = MIN_BACKLIGHT_PERCENT;
   if (backlightPercent > 100) backlightPercent = 100;
@@ -12404,6 +14058,18 @@ void loadPreferences() {
   aprsFilterRadius = preferences->getInt("aprs_radius", DEFAULT_APRS_FILTER_RADIUS);
   yield();
   aprsBeaconEnabled = preferences->getBool("aprs_beacon", true);
+  for (int i = 0; i < APRS_BEACON_LOCATIONS_COUNT; i++) {
+    String nmKey = "bcn" + String(i) + "nm";
+    String latKey = "bcn" + String(i) + "lat";
+    String lonKey = "bcn" + String(i) + "lon";
+    aprsBeaconLocations[i].name = preferences->getString(nmKey.c_str(), "");
+    aprsBeaconLocations[i].lat = preferences->getFloat(latKey.c_str(), 0.0f);
+    aprsBeaconLocations[i].lon = preferences->getFloat(lonKey.c_str(), 0.0f);
+  }
+  aprsBeaconLocationIndex = preferences->getInt("bcn_sel", -1);
+  if (aprsBeaconLocationIndex < -1 || aprsBeaconLocationIndex >= APRS_BEACON_LOCATIONS_COUNT) {
+    aprsBeaconLocationIndex = -1;
+  }
   String aprsSymPref = preferences->getString("aprs_symbol", aprsSymbolTwoChar);
   applyAprsSymbol(aprsSymPref);
   aprsUserComment = preferences->getString("aprs_comment", "");
@@ -12475,6 +14141,12 @@ void savePreferences() {
   preferences->putString("qrz_pass", qrzPassword);
   preferences->putString("weather_key", weatherApiKey);
   preferences->putString("openwebrx_url", openWebRxUrl);
+  preferences->putFloat("aircraft_radius", aircraftRadarRadiusKm);
+  preferences->putString("opensky_id", openSkyClientId);
+  preferences->putString("opensky_secret", openSkyClientSecret);
+  preferences->putBool("aircraft_scan", aircraftShowScanline);
+  preferences->putBool("aircraft_info", aircraftShowInfoText);
+  preferences->putBool("aircraft_dir", aircraftShowDirectionIcon);
   preferences->putInt("tft_backlight", backlightPercent);
   preferences->putBool("tft_inv", tftInvertColors);
   preferences->putUChar("tft_lang", tftLanguage);
@@ -12500,6 +14172,15 @@ void savePreferences() {
   preferences->putInt("aprs_passcode", aprsPasscode);
   preferences->putInt("aprs_ssid", aprsSsid);
   preferences->putBool("aprs_beacon", aprsBeaconEnabled);
+  for (int i = 0; i < APRS_BEACON_LOCATIONS_COUNT; i++) {
+    String nmKey = "bcn" + String(i) + "nm";
+    String latKey = "bcn" + String(i) + "lat";
+    String lonKey = "bcn" + String(i) + "lon";
+    preferences->putString(nmKey.c_str(), aprsBeaconLocations[i].name);
+    preferences->putFloat(latKey.c_str(), (float)aprsBeaconLocations[i].lat);
+    preferences->putFloat(lonKey.c_str(), (float)aprsBeaconLocations[i].lon);
+  }
+  preferences->putInt("bcn_sel", aprsBeaconLocationIndex);
   preferences->putString("aprs_symbol", aprsSymbolTwoChar);
   preferences->putString("aprs_comment", aprsUserComment);
   preferences->putString("aprs_alert", aprsAlertCsv);
@@ -12863,6 +14544,30 @@ void setupWebServer() {
       if (doc["openwebrx_url"].is<String>()) {
         openWebRxUrl = doc["openwebrx_url"].as<String>();
       }
+      if (doc["aircraft_radius"].is<float>() || doc["aircraft_radius"].is<int>()) {
+        aircraftRadarRadiusKm = doc["aircraft_radius"].as<float>();
+        if (aircraftRadarRadiusKm < 1.0f) aircraftRadarRadiusKm = 1.0f;
+        if (aircraftRadarRadiusKm > 500.0f) aircraftRadarRadiusKm = 500.0f;
+      }
+      if (doc["opensky_id"].is<String>()) {
+        openSkyClientId = doc["opensky_id"].as<String>();
+        openSkyClientId.trim();
+      }
+      if (doc["opensky_secret"].is<String>()) {
+        openSkyClientSecret = doc["opensky_secret"].as<String>();
+        openSkyClientSecret.trim();
+        openSkyBearerToken = ""; // wymuś nowy token przy zmianie danych logowania
+        openSkyTokenExpiryMs = 0;
+      }
+      if (doc["aircraft_scan"].is<bool>()) {
+        aircraftShowScanline = doc["aircraft_scan"].as<bool>();
+      }
+      if (doc["aircraft_info"].is<bool>()) {
+        aircraftShowInfoText = doc["aircraft_info"].as<bool>();
+      }
+      if (doc["aircraft_dir"].is<bool>()) {
+        aircraftShowDirectionIcon = doc["aircraft_dir"].as<bool>();
+      }
       if (doc["tft_backlight"].is<int>()) {
         backlightPercent = doc["tft_backlight"].as<int>();
         if (backlightPercent < MIN_BACKLIGHT_PERCENT) backlightPercent = MIN_BACKLIGHT_PERCENT;
@@ -12926,6 +14631,35 @@ void setupWebServer() {
       }
       if (doc["aprs_beacon"].is<bool>()) {
         aprsBeaconEnabled = doc["aprs_beacon"].as<bool>();
+      }
+      if (doc["beacon_locations"].is<JsonArray>()) {
+        JsonArray beaconLocsIn = doc["beacon_locations"].as<JsonArray>();
+        int beaconIdx = 0;
+        for (JsonVariant v : beaconLocsIn) {
+          if (beaconIdx >= APRS_BEACON_LOCATIONS_COUNT) break;
+          if (v["name"].is<const char*>()) {
+            aprsBeaconLocations[beaconIdx].name = sanitizeBeaconLocationName(v["name"].as<String>());
+          }
+          if (v["lat"].is<float>() || v["lat"].is<double>() || v["lat"].is<int>()) {
+            double latCandidate = v["lat"].as<double>();
+            if (latCandidate >= -90.0 && latCandidate <= 90.0) {
+              aprsBeaconLocations[beaconIdx].lat = latCandidate;
+            }
+          }
+          if (v["lon"].is<float>() || v["lon"].is<double>() || v["lon"].is<int>()) {
+            double lonCandidate = v["lon"].as<double>();
+            if (lonCandidate >= -180.0 && lonCandidate <= 180.0) {
+              aprsBeaconLocations[beaconIdx].lon = lonCandidate;
+            }
+          }
+          beaconIdx++;
+        }
+      }
+      if (doc.containsKey("beacon_location_index")) {
+        int beaconSelCandidate = doc["beacon_location_index"].as<int>();
+        if (beaconSelCandidate >= -1 && beaconSelCandidate < APRS_BEACON_LOCATIONS_COUNT) {
+          aprsBeaconLocationIndex = beaconSelCandidate;
+        }
       }
       if (doc["aprs_symbol"].is<String>()) {
         applyAprsSymbol(doc["aprs_symbol"].as<String>());
@@ -13243,6 +14977,22 @@ void setupWebServer() {
     }
   });
   
+  // API - historia przyczyn ostatnich rozruchów/resetów (diagnostyka samoistnych
+  // restartów). Otwórz http://<ip-urzadzenia>/api/reset_log w przeglądarce.
+  server->on("/api/reset_log", HTTP_GET, []() {
+    if (!littleFsReady || !LittleFS.exists(RESET_LOG_FILE)) {
+      server->send(200, "text/plain", "Brak jeszcze zapisanej historii resetow.\n");
+      return;
+    }
+    File f = LittleFS.open(RESET_LOG_FILE, "r");
+    if (!f) {
+      server->send(500, "text/plain", "Blad odczytu pliku logu.\n");
+      return;
+    }
+    server->streamFile(f, "text/plain");
+    f.close();
+  });
+
   // API - resetuj kalibrację dotyku do wartości domyślnych
   server->on("/api/reset_touch", HTTP_POST, []() {
     touchXMin = TOUCH_X_MIN;
@@ -13274,7 +15024,7 @@ void setupWebServer() {
   
   // API - pobierz konfigurację
   server->on("/api/config", HTTP_GET, []() {
-    StaticJsonDocument<4096> doc;
+    StaticJsonDocument<8192> doc; // podniesione z 6144 po dodaniu pol radaru samolotow
     doc["wifi_ssid"] = wifiSSID;
     doc["wifi_pass"] = wifiPassword;
     doc["wifi_ssid2"] = wifiSSID2;
@@ -13299,6 +15049,12 @@ void setupWebServer() {
     doc["qrz_pass"] = qrzPassword;
     doc["weather_key"] = weatherApiKey;
     doc["openwebrx_url"] = openWebRxUrl;
+    doc["aircraft_radius"] = aircraftRadarRadiusKm;
+    doc["opensky_id"] = openSkyClientId;
+    doc["opensky_secret"] = openSkyClientSecret;
+    doc["aircraft_scan"] = aircraftShowScanline;
+    doc["aircraft_info"] = aircraftShowInfoText;
+    doc["aircraft_dir"] = aircraftShowDirectionIcon;
     doc["tft_backlight"] = backlightPercent;
     doc["tft_invert"] = tftInvertColors;
     doc["tft_rotation"] = tftRotation;
@@ -13320,6 +15076,14 @@ void setupWebServer() {
     doc["aprs_ssid"] = aprsSsid;
     doc["aprs_radius"] = aprsFilterRadius;
     doc["aprs_beacon"] = aprsBeaconEnabled;
+    JsonArray beaconLocsOut = doc.createNestedArray("beacon_locations");
+    for (int i = 0; i < APRS_BEACON_LOCATIONS_COUNT; i++) {
+      JsonObject beaconLocObj = beaconLocsOut.createNestedObject();
+      beaconLocObj["name"] = aprsBeaconLocations[i].name;
+      beaconLocObj["lat"] = aprsBeaconLocations[i].lat;
+      beaconLocObj["lon"] = aprsBeaconLocations[i].lon;
+    }
+    doc["beacon_location_index"] = aprsBeaconLocationIndex;
     doc["aprs_symbol"] = aprsSymbolTwoChar;
     doc["aprs_comment"] = aprsUserComment;
     doc["aprs_alert"] = aprsAlertCsv;
@@ -13423,6 +15187,15 @@ void uiTaskLoop(void *parameter) {
       }
       if (pendingScreen6 && (currentScreen == SCREEN_APRS_IS || currentScreen == SCREEN_APRS_RADAR) && !inMenu && !aprsAlertScreenActive) {
         drawScreen(currentScreen);
+      }
+      // Mapa APRS: odświeżaj co 30s — każdy pushColors trwa ~30ms i powoduje miganie
+      if (pendingScreen6 && currentScreen == SCREEN_APRS_MAP && !inMenu && !aprsAlertScreenActive) {
+        static unsigned long lastAprsMapRedrawMs = 0;
+        unsigned long nowMs = millis();
+        if (nowMs - lastAprsMapRedrawMs >= 30000UL) {
+          lastAprsMapRedrawMs = nowMs;
+          drawScreen(SCREEN_APRS_MAP);
+        }
       }
 
       if (aprsAlertDrawPending && !brightnessMenuActive) {
@@ -13528,6 +15301,15 @@ void uiTaskLoop(void *parameter) {
       if (tftInitialized && currentScreen == SCREEN_UNLIS_HUNTER && !inMenu && !aprsAlertScreenActive) {
         updateUnlisHunter();
       }
+
+      if (tftInitialized && currentScreen == SCREEN_AIRCRAFT_RADAR && !inMenu && !aprsAlertScreenActive) {
+        // Stateczny ekran: tylko rzadkie, pełne przerysowanie. Bez animacji/ticków -
+        // to jedyny wariant bez żadnego ryzyka migania czy artefaktów na tej płytce.
+        if (now - lastAircraftRadarBackgroundMs > 2000) {
+          drawAircraftRadar();
+          lastAircraftRadarBackgroundMs = now;
+        }
+      }
     }
 
     vTaskDelay(pdMS_TO_TICKS(10));
@@ -13550,6 +15332,12 @@ void setup() {
   }
   delay(200);
   esp_rom_printf("APP: Serial.begin done\n");
+
+  // Diagnostyka samoistnych resetow: przyczyna ostatniego restartu (np. BROWNOUT
+  // przy zbyt slabym zasilaniu USB). Zapamietana teraz, wypisana po inicjalizacji TFT
+  // (nizej), zeby byla widoczna takze na ekranie boot-loga, nie tylko w Serial.
+  esp_reset_reason_t bootResetReason = esp_reset_reason();
+  esp_rom_printf("APP: reset reason = %s\n", resetReasonToString(bootResetReason));
 
   // Daj chwilÄ™ na ustabilizowanie WiFi/PHY po resecie (zwĹ‚aszcza na "Super Mini")
   delay(300);
@@ -13574,7 +15362,10 @@ void setup() {
   yield();
 #endif
 
+  bootLogLine(String("Reset reason: ") + resetReasonToString(bootResetReason));
+
   littleFsReady = LittleFS.begin(true);
+  logResetReasonPersistent(bootResetReason);
   if (littleFsReady) {
     bootLogLine("LittleFS OK");
     if (LittleFS.exists(ROBOTO_FONT20_FILE)) {
@@ -13653,6 +15444,9 @@ void setup() {
   bootLogLine("System ready!");
   String ipStr = wifiConnected ? WiFi.localIP().toString() : WiFi.softAPIP().toString();
   bootLogLine("IP: " + ipStr);
+  Serial.printf("[MEM] PSRAM: %u / %u bajtow wolne (na starcie, przed uzyciem ekranow)\n",
+                ESP.getFreePsram(), ESP.getPsramSize());
+  Serial.printf("[MEM] Heap: %u / %u bajtow wolne\n", ESP.getFreeHeap(), ESP.getHeapSize());
   
   // Aktualizuj wyĹ›wietlacz TFT (ekran startowy)
 #ifdef ENABLE_TFT_DISPLAY
@@ -13861,6 +15655,16 @@ void loop() {
       lastWeatherFetchOk = fetchWeatherData();
       lastWeatherFetchMs = now;
 
+    }
+  }
+
+  // Aktualizuj radar samolotów (OpenSky Network)
+  if (wifiConnected) {
+    unsigned long now = millis();
+    unsigned long interval = lastAircraftFetchOk ? aircraftFetchIntervalMs : AIRCRAFT_FETCH_RETRY_MS;
+    if (lastAircraftFetchMs == 0 || now - lastAircraftFetchMs > interval) {
+      lastAircraftFetchOk = fetchAircraftData();
+      lastAircraftFetchMs = now;
     }
   }
 

@@ -40,6 +40,10 @@
 
 // SPI frequency (z projektu referencyjnego - 55 MHz działa dobrze)
 //#define SPI_FREQUENCY  27000000
+//#define SPI_FREQUENCY  40000000
+//#define SPI_FREQUENCY  60000000
+//#define SPI_FREQUENCY  70000000
+//#define SPI_FREQUENCY  80000000
 #define SPI_FREQUENCY  55000000
 
 // Optional reduced SPI frequency for reading TFT

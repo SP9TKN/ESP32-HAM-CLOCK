@@ -16,6 +16,7 @@
         <button class="nav-btn" onclick="showPage('pota')">POTA</button>
         <button class="nav-btn" onclick="showPage('hamalert')">HAMALERT</button>
         <button class="nav-btn" onclick="showPage('aprs')">APRS</button>
+        <button class="nav-btn" onclick="showPage('radar')">&#9992; Radar</button>
         <button class="nav-btn" onclick="showPage('propagation')">Propagacja</button>
         <button class="nav-btn" onclick="showPage('alert')">ALERT</button>
         <button class="nav-btn" onclick="showPage('tft')">Ekran TFT</button>
@@ -120,6 +121,39 @@
         </div>
     </div>
 
+    <div id="radar-page" class="page">
+        <div class="config-form">
+            <h2 style="color: #e0e0e0; margin-bottom: 20px; text-align: center;">&#9992; Radar samolotów (adsb.lol)</h2>
+            <div class="config-section">
+                <h3>&#9992; Radar</h3>
+                <div class="form-group">
+                    <label>Promień radaru (km):</label>
+                    <input type="number" id="aircraft_radius" name="aircraft_radius" min="1" max="500" step="1" placeholder="50">
+                    <small>Zasięg wyszukiwania samolotów wokół pozycji stacji (ta sama pozycja co dla radaru APRS). Dane z darmowego, publicznego API adsb.lol - bez rejestracji i bez własnego odbiornika ADS-B (maks. realny zasięg ok. 460 km).</small>
+                </div>
+                <div class="form-group">
+                    <label style="display: flex; align-items: center; gap: 10px;">
+                        <input type="checkbox" id="aircraft_scan" name="aircraft_scan" style="width: auto;">
+                        <span>Pokaż promień skanujący radaru</span>
+                    </label>
+                </div>
+                <div class="form-group">
+                    <label style="display: flex; align-items: center; gap: 10px;">
+                        <input type="checkbox" id="aircraft_info" name="aircraft_info" style="width: auto;">
+                        <span>Pokaż znak wywoławczy/prędkość/wysokość przy samolocie</span>
+                    </label>
+                </div>
+                <div class="form-group">
+                    <label style="display: flex; align-items: center; gap: 10px;">
+                        <input type="checkbox" id="aircraft_dir" name="aircraft_dir" style="width: auto;">
+                        <span>Pokaż ikonę kierunku lotu (zamiast kropki)</span>
+                    </label>
+                </div>
+            </div>
+            <button type="button" class="save-btn" onclick="saveConfig()">💾 Zapisz ustawienia radaru</button>
+        </div>
+    </div>
+
     <div id="propagation-page" class="page">
         <div class="cyd-container dx-mobile-shell propagation-mobile-shell">
             <h2 class="dx-panel-title">PROPAGACJA</h2>
@@ -189,7 +223,7 @@
 
             <div class="config-section">
                 <h3>🖥️ Ekrany TFT (kolejność)</h3>
-                <small>Strona 1 wyświetla się jako pierwsza po włączeniu. Możesz dowolnie ustawić strony 1-11 lub wyłączyć je (OFF).</small>
+                <small>Strona 1 wyświetla się jako pierwsza po włączeniu. Możesz dowolnie ustawić strony 1-13 lub wyłączyć je (OFF).</small>
                 <div class="form-group">
                     <label style="display: flex; align-items: center; gap: 10px;">
                         <input type="checkbox" id="tft_auto_switch" name="tft_auto_switch" style="width: auto;">
@@ -216,6 +250,8 @@
                         <option value="pota">POTA</option>
                         <option value="hamalert">HAMALERT</option>
                         <option value="matrix">MATRIX</option>
+                        <option value="aprsmap">APRS MAP</option>
+                        <option value="aircraftradar">RADAR SAMOLOTOW</option>
                         <option value="off">OFF</option>
                     </select>
                 </div>
@@ -233,6 +269,8 @@
                         <option value="pota">POTA</option>
                         <option value="hamalert">HAMALERT</option>
                         <option value="matrix">MATRIX</option>
+                        <option value="aprsmap">APRS MAP</option>
+                        <option value="aircraftradar">RADAR SAMOLOTOW</option>
                         <option value="off">OFF</option>
                     </select>
                 </div>
@@ -250,6 +288,8 @@
                         <option value="pota">POTA</option>
                         <option value="hamalert">HAMALERT</option>
                         <option value="matrix">MATRIX</option>
+                        <option value="aprsmap">APRS MAP</option>
+                        <option value="aircraftradar">RADAR SAMOLOTOW</option>
                         <option value="off">OFF</option>
                     </select>
                 </div>
@@ -267,6 +307,8 @@
                         <option value="pota">POTA</option>
                         <option value="hamalert">HAMALERT</option>
                         <option value="matrix">MATRIX</option>
+                        <option value="aprsmap">APRS MAP</option>
+                        <option value="aircraftradar">RADAR SAMOLOTOW</option>
                         <option value="off">OFF</option>
                     </select>
                 </div>
@@ -284,6 +326,8 @@
                         <option value="pota">POTA</option>
                         <option value="hamalert">HAMALERT</option>
                         <option value="matrix">MATRIX</option>
+                        <option value="aprsmap">APRS MAP</option>
+                        <option value="aircraftradar">RADAR SAMOLOTOW</option>
                         <option value="off">OFF</option>
                     </select>
                 </div>
@@ -301,6 +345,8 @@
                         <option value="pota">POTA</option>
                         <option value="hamalert">HAMALERT</option>
                         <option value="matrix">MATRIX</option>
+                        <option value="aprsmap">APRS MAP</option>
+                        <option value="aircraftradar">RADAR SAMOLOTOW</option>
                         <option value="off">OFF</option>
                     </select>
                 </div>
@@ -318,6 +364,8 @@
                         <option value="pota">POTA</option>
                         <option value="hamalert">HAMALERT</option>
                         <option value="matrix">MATRIX</option>
+                        <option value="aprsmap">APRS MAP</option>
+                        <option value="aircraftradar">RADAR SAMOLOTOW</option>
                         <option value="off">OFF</option>
                     </select>
                 </div>
@@ -335,6 +383,8 @@
                         <option value="pota">POTA</option>
                         <option value="hamalert">HAMALERT</option>
                         <option value="matrix">MATRIX</option>
+                        <option value="aprsmap">APRS MAP</option>
+                        <option value="aircraftradar">RADAR SAMOLOTOW</option>
                         <option value="off">OFF</option>
                     </select>
                 </div>
@@ -352,6 +402,8 @@
                         <option value="pota">POTA</option>
                         <option value="hamalert">HAMALERT</option>
                         <option value="matrix">MATRIX</option>
+                        <option value="aprsmap">APRS MAP</option>
+                        <option value="aircraftradar">RADAR SAMOLOTOW</option>
                         <option value="off">OFF</option>
                     </select>
                 </div>
@@ -369,6 +421,8 @@
                         <option value="pota">POTA</option>
                         <option value="hamalert">HAMALERT</option>
                         <option value="matrix">MATRIX</option>
+                        <option value="aprsmap">APRS MAP</option>
+                        <option value="aircraftradar">RADAR SAMOLOTOW</option>
                         <option value="off">OFF</option>
                     </select>
                 </div>
@@ -386,6 +440,46 @@
                         <option value="pota">POTA</option>
                         <option value="hamalert">HAMALERT</option>
                         <option value="matrix">MATRIX</option>
+                        <option value="aprsmap">APRS MAP</option>
+                        <option value="aircraftradar">RADAR SAMOLOTOW</option>
+                        <option value="off">OFF</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Strona 12:</label>
+                    <select id="screen_slot_12">
+                        <option value="hamclock">HAM CLOCK</option>
+                        <option value="dxcluster">DX CLUSTER</option>
+                        <option value="aprsis">APRS-IS</option>
+                        <option value="aprsradar">APRS RADAR</option>
+                        <option value="bandinfo">BAND INFO</option>
+                        <option value="sunspots">SUN SPOTS</option>
+                        <option value="weather">WEATHER</option>
+                        <option value="weatherforecast">WEATHER FORECAST</option>
+                        <option value="pota">POTA</option>
+                        <option value="hamalert">HAMALERT</option>
+                        <option value="matrix">MATRIX</option>
+                        <option value="aprsmap">APRS MAP</option>
+                        <option value="aircraftradar">RADAR SAMOLOTOW</option>
+                        <option value="off">OFF</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Strona 13:</label>
+                    <select id="screen_slot_13">
+                        <option value="hamclock">HAM CLOCK</option>
+                        <option value="dxcluster">DX CLUSTER</option>
+                        <option value="aprsis">APRS-IS</option>
+                        <option value="aprsradar">APRS RADAR</option>
+                        <option value="bandinfo">BAND INFO</option>
+                        <option value="sunspots">SUN SPOTS</option>
+                        <option value="weather">WEATHER</option>
+                        <option value="weatherforecast">WEATHER FORECAST</option>
+                        <option value="pota">POTA</option>
+                        <option value="hamalert">HAMALERT</option>
+                        <option value="matrix">MATRIX</option>
+                        <option value="aprsmap">APRS MAP</option>
+                        <option value="aircraftradar">RADAR SAMOLOTOW</option>
                         <option value="off">OFF</option>
                     </select>
                 </div>
@@ -780,7 +874,63 @@
                         <small>Odstęp między kolejnymi beaconami po pierwszym (który idzie po 1 minucie). Zakres 1-180 min.</small>
                     </div>
                 </div>
-                
+
+                <!-- Sekcja: Zaprogramowane miejsca beaconu APRS -->
+                <div class="config-section">
+                    <h3>📍 Miejsca beaconu APRS</h3>
+                    <div class="form-group">
+                        <small>Ustaw tutaj nazwy i współrzędne do 6 miejsc. Wybór, z którego miejsca aktualnie nadawany jest beacon, odbywa się na ekranie dotykowym (APRS &rarr; menu &rarr; Beaconing). Puste miejsce (bez nazwy) nie pojawi się na liście wyboru.</small>
+                    </div>
+                    <div class="form-group beacon-loc-row">
+                        <label>Miejsce 1:</label>
+                        <input type="text" id="bcn0_name" maxlength="16" placeholder="Nazwa (np. Dom)">
+                        <div class="beacon-loc-coords">
+                            <input type="number" id="bcn0_lat" step="0.000001" min="-90" max="90" placeholder="Lat">
+                            <input type="number" id="bcn0_lon" step="0.000001" min="-180" max="180" placeholder="Lon">
+                        </div>
+                    </div>
+                    <div class="form-group beacon-loc-row">
+                        <label>Miejsce 2:</label>
+                        <input type="text" id="bcn1_name" maxlength="16" placeholder="Nazwa (np. Praca)">
+                        <div class="beacon-loc-coords">
+                            <input type="number" id="bcn1_lat" step="0.000001" min="-90" max="90" placeholder="Lat">
+                            <input type="number" id="bcn1_lon" step="0.000001" min="-180" max="180" placeholder="Lon">
+                        </div>
+                    </div>
+                    <div class="form-group beacon-loc-row">
+                        <label>Miejsce 3:</label>
+                        <input type="text" id="bcn2_name" maxlength="16" placeholder="Nazwa">
+                        <div class="beacon-loc-coords">
+                            <input type="number" id="bcn2_lat" step="0.000001" min="-90" max="90" placeholder="Lat">
+                            <input type="number" id="bcn2_lon" step="0.000001" min="-180" max="180" placeholder="Lon">
+                        </div>
+                    </div>
+                    <div class="form-group beacon-loc-row">
+                        <label>Miejsce 4:</label>
+                        <input type="text" id="bcn3_name" maxlength="16" placeholder="Nazwa">
+                        <div class="beacon-loc-coords">
+                            <input type="number" id="bcn3_lat" step="0.000001" min="-90" max="90" placeholder="Lat">
+                            <input type="number" id="bcn3_lon" step="0.000001" min="-180" max="180" placeholder="Lon">
+                        </div>
+                    </div>
+                    <div class="form-group beacon-loc-row">
+                        <label>Miejsce 5:</label>
+                        <input type="text" id="bcn4_name" maxlength="16" placeholder="Nazwa">
+                        <div class="beacon-loc-coords">
+                            <input type="number" id="bcn4_lat" step="0.000001" min="-90" max="90" placeholder="Lat">
+                            <input type="number" id="bcn4_lon" step="0.000001" min="-180" max="180" placeholder="Lon">
+                        </div>
+                    </div>
+                    <div class="form-group beacon-loc-row">
+                        <label>Miejsce 6:</label>
+                        <input type="text" id="bcn5_name" maxlength="16" placeholder="Nazwa">
+                        <div class="beacon-loc-coords">
+                            <input type="number" id="bcn5_lat" step="0.000001" min="-90" max="90" placeholder="Lat">
+                            <input type="number" id="bcn5_lon" step="0.000001" min="-180" max="180" placeholder="Lon">
+                        </div>
+                    </div>
+                </div>
+
                 <button type="submit" class="save-btn">💾 Zapisz Konfigurację</button>
                 <div class="config-section" style="margin-top: 20px;">
                     <h3>📁 Kopia ustawień</h3>
@@ -950,7 +1100,7 @@
             const bottomBtn = document.querySelector('.links-bottom-btn');
             if (bottomBtn) bottomBtn.classList.toggle('active', page === 'links');
             document.getElementById(page + '-page').classList.add('active');
-            if (page === "config" || page === "tft" || page === "alert") {
+            if (page === "config" || page === "tft" || page === "alert" || page === "radar") {
                 loadConfig();
             } else if (page === "aprs") {
                 loadAPRS();
@@ -1184,11 +1334,11 @@
             document.getElementById('status').textContent = "Wyświetlono " + filtered.length + " spotów";
         }
         
-        const screenOptionsDefault = ["hamclock","dxcluster","aprsis","aprsradar","bandinfo","sunspots","weather","weatherforecast","pota","hamalert","matrix"];
+        const screenOptionsDefault = ["hamclock","dxcluster","aprsis","aprsradar","aprsmap","bandinfo","sunspots","weather","weatherforecast","pota","hamalert","aircraftradar","matrix"];
 
         const applyScreenOrderToUI = (order) => {
             const arr = Array.isArray(order) && order.length ? order : screenOptionsDefault;
-            for (let i = 0; i < 11; i++) {
+            for (let i = 0; i < screenOptionsDefault.length; i++) {
                 const sel = document.getElementById(`screen_slot_${i+1}`);
                 if (!sel) continue;
                 sel.value = arr[i] || screenOptionsDefault[i] || "off";
@@ -1197,7 +1347,7 @@
 
         const readScreenOrderFromUI = () => {
             const arr = [];
-            for (let i = 0; i < 11; i++) {
+            for (let i = 0; i < screenOptionsDefault.length; i++) {
                 const sel = document.getElementById(`screen_slot_${i+1}`);
                 arr.push(sel ? sel.value : "off");
             }
@@ -1226,7 +1376,21 @@
             return cleaned.join(',');
         };
 
+        let lastLoadedBeaconLocationIndex = -1;
+
         const applyConfigToUI = (data) => {
+            lastLoadedBeaconLocationIndex = (data.beacon_location_index !== undefined && data.beacon_location_index !== null) ? parseInt(data.beacon_location_index, 10) : -1;
+            if (!Number.isFinite(lastLoadedBeaconLocationIndex)) lastLoadedBeaconLocationIndex = -1;
+            const beaconLocs = Array.isArray(data.beacon_locations) ? data.beacon_locations : [];
+            for (let i = 0; i < 6; i++) {
+                const loc = beaconLocs[i] || {};
+                const nameEl = document.getElementById('bcn' + i + '_name');
+                const latEl = document.getElementById('bcn' + i + '_lat');
+                const lonEl = document.getElementById('bcn' + i + '_lon');
+                if (nameEl) nameEl.value = loc.name || "";
+                if (latEl) latEl.value = (loc.lat !== undefined && loc.lat !== null) ? loc.lat : "";
+                if (lonEl) lonEl.value = (loc.lon !== undefined && loc.lon !== null) ? loc.lon : "";
+            }
             document.getElementById('wifi_ssid').value = data.wifi_ssid || "";
             document.getElementById('wifi_pass').value = data.wifi_pass || "";
             document.getElementById('wifi_ssid2').value = data.wifi_ssid2 || "";
@@ -1279,6 +1443,10 @@
             document.getElementById('openwebrx_url').value = data.openwebrx_url || "";
             openWebRxBase = normalizeOpenWebRx(data.openwebrx_url);
             document.getElementById('qrz_status').value = data.qrz_status || "";
+            document.getElementById('aircraft_radius').value = data.aircraft_radius || 50;
+            document.getElementById('aircraft_scan').checked = data.aircraft_scan !== false;
+            document.getElementById('aircraft_info').checked = data.aircraft_info !== false;
+            document.getElementById('aircraft_dir').checked = data.aircraft_dir !== false;
             document.getElementById('cluster_noann').checked = data.cluster_noann !== false;
             document.getElementById('cluster_nowwv').checked = data.cluster_nowwv !== false;
             document.getElementById('cluster_nowcy').checked = data.cluster_nowcy !== false;
@@ -1942,9 +2110,29 @@
             };
         };
 
+        const collectBeaconLocations = () => {
+            const locs = [];
+            for (let i = 0; i < 6; i++) {
+                const nameEl = document.getElementById('bcn' + i + '_name');
+                const latEl = document.getElementById('bcn' + i + '_lat');
+                const lonEl = document.getElementById('bcn' + i + '_lon');
+                const name = nameEl ? nameEl.value.trim() : "";
+                const lat = latEl ? parseFloat(latEl.value) : NaN;
+                const lon = lonEl ? parseFloat(lonEl.value) : NaN;
+                locs.push({
+                    name: name,
+                    lat: Number.isFinite(lat) ? lat : 0,
+                    lon: Number.isFinite(lon) ? lon : 0
+                });
+            }
+            return locs;
+        };
+
         const collectConfigPayload = () => {
             const hamalertCfg = collectHamalertConfig();
             return {
+            beacon_locations: collectBeaconLocations(),
+            beacon_location_index: lastLoadedBeaconLocationIndex,
             wifi_ssid: document.getElementById('wifi_ssid').value,
             wifi_pass: document.getElementById('wifi_pass').value,
             wifi_ssid2: document.getElementById('wifi_ssid2').value,
@@ -1978,6 +2166,10 @@
             qrz_pass: document.getElementById('qrz_pass').value,
             weather_key: document.getElementById('weather_key').value,
             openwebrx_url: document.getElementById('openwebrx_url').value,
+            aircraft_radius: parseFloat(document.getElementById('aircraft_radius').value) || 50,
+            aircraft_scan: document.getElementById('aircraft_scan').checked,
+            aircraft_info: document.getElementById('aircraft_info').checked,
+            aircraft_dir: document.getElementById('aircraft_dir').checked,
             cluster_noann: document.getElementById('cluster_noann').checked,
             cluster_nowwv: document.getElementById('cluster_nowwv').checked,
             cluster_nowcy: document.getElementById('cluster_nowcy').checked,

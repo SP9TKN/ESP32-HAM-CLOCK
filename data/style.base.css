@@ -406,6 +406,16 @@ label {
     margin-bottom: 0;
 }
 
+.beacon-loc-coords {
+    display: flex;
+    gap: 8px;
+    margin-top: 6px;
+}
+
+.beacon-loc-coords input {
+    flex: 1;
+}
+
 .checkbox-label input[type="checkbox"] {
     width: auto;
     margin: 0;

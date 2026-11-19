@@ -17,6 +17,7 @@
         <button class="nav-btn" onclick="showPage('pota')">POTA</button>
         <button class="nav-btn" onclick="showPage('hamalert')">HAMALERT</button>
         <button class="nav-btn" onclick="showPage('aprs')">APRS</button>
+        <button class="nav-btn" onclick="showPage('radar')">&#9992; Radar</button>
         <button class="nav-btn" onclick="showPage('propagation')">Propagation</button>
         <button class="nav-btn" onclick="showPage('alert')">ALERT</button>
         <button class="nav-btn" onclick="showPage('tft')">TFT Screen</button>
@@ -120,6 +121,39 @@
         </div>
     </div>
 
+    <div id="radar-page" class="page">
+        <div class="config-form">
+            <h2 style="color: #e0e0e0; margin-bottom: 20px; text-align: center;">&#9992; Aircraft Radar (adsb.lol)</h2>
+            <div class="config-section">
+                <h3>&#9992; Radar</h3>
+                <div class="form-group">
+                    <label>Radar radius (km):</label>
+                    <input type="number" id="aircraft_radius" name="aircraft_radius" min="1" max="500" step="1" placeholder="50">
+                    <small>Aircraft search range around the station position (same position as the APRS radar). Data from the free, public adsb.lol API - no registration and no ADS-B receiver needed (effective max range about 460 km).</small>
+                </div>
+                <div class="form-group">
+                    <label style="display: flex; align-items: center; gap: 10px;">
+                        <input type="checkbox" id="aircraft_scan" name="aircraft_scan" style="width: auto;">
+                        <span>Show radar sweep line</span>
+                    </label>
+                </div>
+                <div class="form-group">
+                    <label style="display: flex; align-items: center; gap: 10px;">
+                        <input type="checkbox" id="aircraft_info" name="aircraft_info" style="width: auto;">
+                        <span>Show callsign/speed/altitude next to aircraft</span>
+                    </label>
+                </div>
+                <div class="form-group">
+                    <label style="display: flex; align-items: center; gap: 10px;">
+                        <input type="checkbox" id="aircraft_dir" name="aircraft_dir" style="width: auto;">
+                        <span>Show heading icon (instead of a dot)</span>
+                    </label>
+                </div>
+            </div>
+            <button type="button" class="save-btn" onclick="saveConfig()">💾 Save radar settings</button>
+        </div>
+    </div>
+
     <div id="propagation-page" class="page">
         <div class="cyd-container dx-mobile-shell propagation-mobile-shell">
             <h2 class="dx-panel-title">PROPAGATION</h2>
@@ -189,7 +223,7 @@
 
             <div class="config-section">
                 <h3>🖥️ TFT Screens (order)</h3>
-                <small>Page 1 shows first after power-up. You can set pages 1-11 or disable them (OFF).</small>
+                <small>Page 1 shows first after power-up. You can set pages 1-13 or disable them (OFF).</small>
                 <div class="form-group">
                     <label style="display: flex; align-items: center; gap: 10px;">
                         <input type="checkbox" id="tft_auto_switch" name="tft_auto_switch" style="width: auto;">
@@ -216,6 +250,8 @@
                         <option value="pota">POTA</option>
                         <option value="hamalert">HAMALERT</option>
                         <option value="matrix">MATRIX</option>
+                        <option value="aprsmap">APRS MAP</option>
+                        <option value="aircraftradar">AIRCRAFT RADAR</option>
                         <option value="off">OFF</option>
                     </select>
                 </div>
@@ -233,6 +269,8 @@
                         <option value="pota">POTA</option>
                         <option value="hamalert">HAMALERT</option>
                         <option value="matrix">MATRIX</option>
+                        <option value="aprsmap">APRS MAP</option>
+                        <option value="aircraftradar">AIRCRAFT RADAR</option>
                         <option value="off">OFF</option>
                     </select>
                 </div>
@@ -250,6 +288,8 @@
                         <option value="pota">POTA</option>
                         <option value="hamalert">HAMALERT</option>
                         <option value="matrix">MATRIX</option>
+                        <option value="aprsmap">APRS MAP</option>
+                        <option value="aircraftradar">AIRCRAFT RADAR</option>
                         <option value="off">OFF</option>
                     </select>
                 </div>
@@ -267,6 +307,8 @@
                         <option value="pota">POTA</option>
                         <option value="hamalert">HAMALERT</option>
                         <option value="matrix">MATRIX</option>
+                        <option value="aprsmap">APRS MAP</option>
+                        <option value="aircraftradar">AIRCRAFT RADAR</option>
                         <option value="off">OFF</option>
                     </select>
                 </div>
@@ -284,6 +326,8 @@
                         <option value="pota">POTA</option>
                         <option value="hamalert">HAMALERT</option>
                         <option value="matrix">MATRIX</option>
+                        <option value="aprsmap">APRS MAP</option>
+                        <option value="aircraftradar">AIRCRAFT RADAR</option>
                         <option value="off">OFF</option>
                     </select>
                 </div>
@@ -301,6 +345,8 @@
                         <option value="pota">POTA</option>
                         <option value="hamalert">HAMALERT</option>
                         <option value="matrix">MATRIX</option>
+                        <option value="aprsmap">APRS MAP</option>
+                        <option value="aircraftradar">AIRCRAFT RADAR</option>
                         <option value="off">OFF</option>
                     </select>
                 </div>
@@ -318,6 +364,8 @@
                         <option value="pota">POTA</option>
                         <option value="hamalert">HAMALERT</option>
                         <option value="matrix">MATRIX</option>
+                        <option value="aprsmap">APRS MAP</option>
+                        <option value="aircraftradar">AIRCRAFT RADAR</option>
                         <option value="off">OFF</option>
                     </select>
                 </div>
@@ -335,6 +383,8 @@
                         <option value="pota">POTA</option>
                         <option value="hamalert">HAMALERT</option>
                         <option value="matrix">MATRIX</option>
+                        <option value="aprsmap">APRS MAP</option>
+                        <option value="aircraftradar">AIRCRAFT RADAR</option>
                         <option value="off">OFF</option>
                     </select>
                 </div>
@@ -352,6 +402,8 @@
                         <option value="pota">POTA</option>
                         <option value="hamalert">HAMALERT</option>
                         <option value="matrix">MATRIX</option>
+                        <option value="aprsmap">APRS MAP</option>
+                        <option value="aircraftradar">AIRCRAFT RADAR</option>
                         <option value="off">OFF</option>
                     </select>
                 </div>
@@ -369,6 +421,8 @@
                         <option value="pota">POTA</option>
                         <option value="hamalert">HAMALERT</option>
                         <option value="matrix">MATRIX</option>
+                        <option value="aprsmap">APRS MAP</option>
+                        <option value="aircraftradar">AIRCRAFT RADAR</option>
                         <option value="off">OFF</option>
                     </select>
                 </div>
@@ -386,6 +440,46 @@
                         <option value="pota">POTA</option>
                         <option value="hamalert">HAMALERT</option>
                         <option value="matrix">MATRIX</option>
+                        <option value="aprsmap">APRS MAP</option>
+                        <option value="aircraftradar">AIRCRAFT RADAR</option>
+                        <option value="off">OFF</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Page 12:</label>
+                    <select id="screen_slot_12">
+                        <option value="hamclock">HAM CLOCK</option>
+                        <option value="dxcluster">DX CLUSTER</option>
+                        <option value="aprsis">APRS-IS</option>
+                        <option value="aprsradar">APRS RADAR</option>
+                        <option value="bandinfo">BAND INFO</option>
+                        <option value="sunspots">SUN SPOTS</option>
+                        <option value="weather">WEATHER</option>
+                        <option value="weatherforecast">WEATHER FORECAST</option>
+                        <option value="pota">POTA</option>
+                        <option value="hamalert">HAMALERT</option>
+                        <option value="matrix">MATRIX</option>
+                        <option value="aprsmap">APRS MAP</option>
+                        <option value="aircraftradar">AIRCRAFT RADAR</option>
+                        <option value="off">OFF</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Page 13:</label>
+                    <select id="screen_slot_13">
+                        <option value="hamclock">HAM CLOCK</option>
+                        <option value="dxcluster">DX CLUSTER</option>
+                        <option value="aprsis">APRS-IS</option>
+                        <option value="aprsradar">APRS RADAR</option>
+                        <option value="bandinfo">BAND INFO</option>
+                        <option value="sunspots">SUN SPOTS</option>
+                        <option value="weather">WEATHER</option>
+                        <option value="weatherforecast">WEATHER FORECAST</option>
+                        <option value="pota">POTA</option>
+                        <option value="hamalert">HAMALERT</option>
+                        <option value="matrix">MATRIX</option>
+                        <option value="aprsmap">APRS MAP</option>
+                        <option value="aircraftradar">AIRCRAFT RADAR</option>
                         <option value="off">OFF</option>
                     </select>
                 </div>
@@ -1048,7 +1142,7 @@
             const bottomBtn = document.querySelector('.links-bottom-btn');
             if (bottomBtn) bottomBtn.classList.toggle('active', page === 'links');
             document.getElementById(page + '-page').classList.add('active');
-            if (page === "config" || page === "tft" || page === "alert") {
+            if (page === "config" || page === "tft" || page === "alert" || page === "radar") {
                 loadConfig();
             } else if (page === "aprs") {
                 loadAPRS();
@@ -1282,11 +1376,11 @@
             document.getElementById('status').textContent = "Showing " + filtered.length + " spots";
         }
         
-        const screenOptionsDefault = ["hamclock","dxcluster","aprsis","aprsradar","bandinfo","sunspots","weather","weatherforecast","pota","hamalert","matrix"];
+        const screenOptionsDefault = ["hamclock","dxcluster","aprsis","aprsradar","aprsmap","bandinfo","sunspots","weather","weatherforecast","pota","hamalert","aircraftradar","matrix"];
 
         const applyScreenOrderToUI = (order) => {
             const arr = Array.isArray(order) && order.length ? order : screenOptionsDefault;
-            for (let i = 0; i < 11; i++) {
+            for (let i = 0; i < screenOptionsDefault.length; i++) {
                 const sel = document.getElementById(`screen_slot_${i+1}`);
                 if (!sel) continue;
                 sel.value = arr[i] || screenOptionsDefault[i] || "off";
@@ -1295,7 +1389,7 @@
 
         const readScreenOrderFromUI = () => {
             const arr = [];
-            for (let i = 0; i < 11; i++) {
+            for (let i = 0; i < screenOptionsDefault.length; i++) {
                 const sel = document.getElementById(`screen_slot_${i+1}`);
                 arr.push(sel ? sel.value : "off");
             }
@@ -1377,6 +1471,10 @@
             document.getElementById('openwebrx_url').value = data.openwebrx_url || "";
             openWebRxBase = normalizeOpenWebRx(data.openwebrx_url);
             document.getElementById('qrz_status').value = data.qrz_status || "";
+            document.getElementById('aircraft_radius').value = data.aircraft_radius || 50;
+            document.getElementById('aircraft_scan').checked = data.aircraft_scan !== false;
+            document.getElementById('aircraft_info').checked = data.aircraft_info !== false;
+            document.getElementById('aircraft_dir').checked = data.aircraft_dir !== false;
             document.getElementById('cluster_noann').checked = data.cluster_noann !== false;
             document.getElementById('cluster_nowwv').checked = data.cluster_nowwv !== false;
             document.getElementById('cluster_nowcy').checked = data.cluster_nowcy !== false;
@@ -1974,6 +2072,10 @@
             qrz_pass: document.getElementById('qrz_pass').value,
             weather_key: document.getElementById('weather_key').value,
             openwebrx_url: document.getElementById('openwebrx_url').value,
+            aircraft_radius: parseFloat(document.getElementById('aircraft_radius').value) || 50,
+            aircraft_scan: document.getElementById('aircraft_scan').checked,
+            aircraft_info: document.getElementById('aircraft_info').checked,
+            aircraft_dir: document.getElementById('aircraft_dir').checked,
             cluster_noann: document.getElementById('cluster_noann').checked,
             cluster_nowwv: document.getElementById('cluster_nowwv').checked,
             cluster_nowcy: document.getElementById('cluster_nowcy').checked,
