@@ -1,0 +1,5 @@
+out/
+sd/
+parts_*.inc
+glcdfont.c
+*.exe

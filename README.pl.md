@@ -15,9 +15,23 @@ angielsku (*Język TFT*), a panel WWW ma oba języki.
 </p>
 <p align="center"><sub>Ekrany oryginalnego ESP32 HAM CLOCK — zdjęcia SP3KON z jego repozytorium.</sub></p>
 
+<p align="center">
+  <img src="docs/images/screen-aircraft-radar.png" width="49%" alt="Radar samolotów: okręgi 100 i 50 km, linia skanująca z ogonem, ikony samolotów ze znakiem, prędkością i wysokością">
+  <img src="docs/images/screen-aprs-map.png" width="49%" alt="Mapa APRS: kafelki OpenStreetMap Krakowa, stacje APRS jako kolorowe kropki ze znakami, krzyżyk własnej pozycji">
+</p>
+<p align="center"><sub>Dwie nowe strony, narysowane na PC funkcjami samego firmware'u (<code>drawAircraftRadar</code>,
+<code>drawAprsMap</code>) — zobacz <a href="tools/screen-sim">tools/screen-sim</a>. Dane pokazowe: fikcyjne loty i stacje
+N0CALL wokół pozycji pokazowej w Krakowie. Mapa © autorzy OpenStreetMap.</sub></p>
+
 ## Co dodaje ten fork
 
-### Radar samolotów (strona *RADAR SAMOLOTOW*)
+### Radar samolotów (strona *RADAR SAMOLOTOW*, na ekranie *RADAR LOTOW*)
+
+Oparty na [micro-radar](https://github.com/AnthonySturdy/micro-radar) Anthony'ego Sturdy'ego (MIT), *małym radarze lotów
+na biurko*: wygląd radaru, ogon linii skanującej, opcje wyświetlania i obsługa tokenu OpenSky pochodzą z niego,
+a ikony samolotów z jego wersji na CYD (także w [donwade/adsb-m5](https://github.com/donwade/adsb-m5)). Tutaj to jedna
+ze stron HAM CLOCK, z danymi z adsb.lol.
+
 
 - Samoloty wokół Twojej stacji z [adsb.lol](https://adsb.lol), darmowo i publicznie: bez rejestracji i bez własnego
   odbiornika ADS-B. Promień ustawiasz w km w panelu WWW (API pozwala do 250 NM, ok. 460 km).
@@ -30,6 +44,8 @@ angielsku (*Język TFT*), a panel WWW ma oba języki.
 - Stacje z APRS-IS na prawdziwej mapie: kafelki OpenStreetMap zapisane na karcie microSD jako surowe RGB565
   (`/tiles/<zoom>/<x>/<y>.raw`), stacje rysowane standardowymi symbolami APRS (`/symbols/aprs_sym_0..2.raw`).
 - Dotyk: przeciągnięcie przesuwa mapę; stuknięcie w górną część przybliża, w dolną oddala (zoom 8–16).
+- Kolory: samochód czerwony, pieszy niebieski, dom żółty, pozostałe stacje zielone; pomarańczowy krzyżyk to Twoja
+  pozycja.
 - Z PSRAM mapa jest rysowana do bufora ekranu, bez PSRAM prosto z karty.
 
 Przygotowanie karty na PC (Python 3 z Pillow), potem skopiuj `tiles/` i `symbols/` do katalogu głównego karty FAT32:
@@ -112,7 +128,8 @@ kontrolna i SHA-256 przeliczone).
 
 ## Licencja
 
-[MIT](LICENSE), jak oryginał. Dane mapy © autorzy OpenStreetMap (ODbL); symbole APRS pochodzą
+[MIT](LICENSE), jak oryginał. Radar samolotów zawiera kod przeniesiony z micro-radar, © 2026 Anthony Sturdy, MIT —
+zobacz [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Dane mapy © autorzy OpenStreetMap (ODbL); symbole APRS pochodzą
 z [hessu/aprs-symbols](https://github.com/hessu/aprs-symbols) (ich licencja w tamtym repozytorium).
 
 **Narzędzia:** program powstał z pomocą [Claude Code](https://claude.com/claude-code) (Anthropic) — asystent AI

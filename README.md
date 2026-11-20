@@ -16,9 +16,23 @@ language*), and the web panel has both languages.
 </p>
 <p align="center"><sub>Screens of the original ESP32 HAM CLOCK — photos by SP3KON from his repository.</sub></p>
 
+<p align="center">
+  <img src="docs/images/screen-aircraft-radar.png" width="49%" alt="Aircraft radar page: range rings 100 and 50 km, sweep line with a trail, aircraft icons with callsign, speed and altitude">
+  <img src="docs/images/screen-aprs-map.png" width="49%" alt="APRS map page: OpenStreetMap tiles of Krakow, APRS stations as coloured dots with callsigns, a cross for your own position">
+</p>
+<p align="center"><sub>The two new pages, drawn on a PC by the firmware's own functions (<code>drawAircraftRadar</code>,
+<code>drawAprsMap</code>) — see <a href="tools/screen-sim">tools/screen-sim</a>. Demo data: fictional flights and N0CALL
+stations around a demo position in Kraków. Map © OpenStreetMap contributors.</sub></p>
+
 ## What this fork adds
 
-### Aircraft radar (page *AIRCRAFT RADAR*)
+### Aircraft radar (page *AIRCRAFT RADAR*, on the screen *RADAR LOTOW*)
+
+Based on [micro-radar](https://github.com/AnthonySturdy/micro-radar) by Anthony Sturdy (MIT), *a tiny open-source
+flight radar for your desk*: the radar look, the sweep trail, the display options and the OpenSky token code come from
+it, and the plane icons from its version for the CYD (also in [donwade/adsb-m5](https://github.com/donwade/adsb-m5)).
+Here it is one of the HAM CLOCK pages, with the data from adsb.lol.
+
 
 - Aircraft around your station from [adsb.lol](https://adsb.lol), free and public: no registration and no ADS-B
   receiver of your own. The radius is set in km in the web panel (the API allows up to 250 NM, about 460 km).
@@ -31,6 +45,7 @@ language*), and the web panel has both languages.
 - APRS-IS stations on a real map: OpenStreetMap tiles stored on the microSD card as raw RGB565
   (`/tiles/<zoom>/<x>/<y>.raw`), stations drawn with the standard APRS symbols (`/symbols/aprs_sym_0..2.raw`).
 - Touch: drag to move the map; tap the upper part to zoom in and the lower part to zoom out (zoom 8–16).
+- Colours: car red, walker blue, house yellow, other stations green; the orange cross is your position.
 - With PSRAM the map is drawn into a screen buffer; without it, straight from the card.
 
 Preparing the card on a PC (Python 3 with Pillow), then copy `tiles/` and `symbols/` to the root of the FAT32 card:
@@ -113,7 +128,8 @@ checksum and SHA-256 recalculated).
 
 ## License
 
-[MIT](LICENSE), like the original. Map data © OpenStreetMap contributors (ODbL); the APRS symbols come from
+[MIT](LICENSE), like the original. The aircraft radar contains code adapted from micro-radar, © 2026 Anthony Sturdy,
+MIT — see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Map data © OpenStreetMap contributors (ODbL); the APRS symbols come from
 [hessu/aprs-symbols](https://github.com/hessu/aprs-symbols) (see that repository for their license).
 
 **Tools:** developed with [Claude Code](https://claude.com/claude-code) (Anthropic) — AI assistant used for
